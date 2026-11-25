@@ -110,6 +110,37 @@ and in `boxes=` the number of replacements. A removed value becomes `[REDACTED]`
 A larger model does not fit; a smaller one (`MODEL=qwen3.5:4b-q4_K_M ./build.sh`) is about twice as fast.
 Close heavy apps during a session: the VM may use up to 12 of the Mac's 16 GB.
 
+## GPU variant (optional, about twice as fast)
+
+`./ephemeral-llm-gpu` is the same sealed session in a second Colima VM of type krunkit, which passes the
+Mac's GPU into the container as one device. Measured on an M1 Pro: 59-60 s for the self-test set against
+90-151 s on the CPU kit. Only one of the two VMs fits in 16 GB, so you switch between them:
+
+```bash
+./ephemeral-llm-gpu vm-start
+```
+
+```bash
+./ephemeral-llm-gpu build
+```
+
+```bash
+./ephemeral-llm-gpu open ~/Downloads/statements
+```
+
+```bash
+./ephemeral-llm-gpu vm-stop
+```
+
+`vm-start` stops the CPU VM (refused while a session is running) and starts the GPU one; `vm-stop` does the
+reverse. `build` is needed once. Every other command is the same as `./ephemeral-llm`, including `redact`,
+`kill` and `selftest`. At start it prints the device the model landed on, for example
+`model device: Vulkan0: Virtio-GPU Venus (Apple M1 Pro)`.
+
+Differences from the CPU kit: the model runs on llama.cpp's Vulkan server from the RamaLama image instead of
+Ollama (so `ollama run` is not available inside), the container has exactly one device (`/dev/dri`), which the
+seal check counts, and the GPU path into the VM is newer and less tested than a CPU-only container.
+
 ## What is and is not guaranteed
 
 - Enforced by Docker and checked on every start: `--network none`, no mounts, no ports, read-only root, no
