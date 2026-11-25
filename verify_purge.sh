@@ -1,7 +1,7 @@
 #!/bin/bash
 # After kill: five checks, written to ~/PrivateRedactor/evidence/PURGE_REPORT_<time>.txt.
 # The purge counts only if the report ends with RESULT: PURGED.
-# Usage: verify_purge.sh [--outputs]     (--outputs also deletes /tmp/redacted)
+# Usage: verify_purge.sh [--outputs]     (--outputs also deletes the redacted copies in /tmp)
 set -uo pipefail
 KIT="$(cd "$(dirname "$0")" && pwd)"
 . "$KIT/config.sh"
@@ -51,12 +51,12 @@ else
 fi
 
 # 4. redacted copies on the Mac
-outputs() { find "$OUT_DIR" -maxdepth 1 -type f -name 'REDACTED_*.pdf' -user "$(id -un)" 2>/dev/null; }
+outputs() { find "$OUT_DIR" -maxdepth 1 -type f -name 'REDACTED_*' \( -name '*.pdf' -o -name '*.xlsx' -o -name '*.csv' -o -name '*.tsv' \) -user "$(id -un)" 2>/dev/null; }
 if [ "${1:-}" = "--outputs" ]; then
     outputs | while IFS= read -r f; do rm -f "$f"; done
-    if [ -n "$(outputs)" ]; then fail 4 "redacted copies still in /tmp after --outputs"; else pass 4 "/tmp/REDACTED_*.pdf deleted"; fi
+    if [ -n "$(outputs)" ]; then fail 4 "redacted copies still in /tmp after --outputs"; else pass 4 "/tmp/REDACTED_* (pdf, xlsx, csv, tsv) deleted"; fi
 elif [ -n "$(outputs)" ]; then
-    info 4 "redacted copies kept as /tmp/REDACTED_*.pdf ($(outputs | wc -l | tr -d ' ') PDF); delete with: ./ephemeral-llm clean --host"
+    info 4 "redacted copies kept as /tmp/REDACTED_* ($(outputs | wc -l | tr -d ' ') file(s): pdf, xlsx, csv, tsv); delete with: ./ephemeral-llm clean --host"
 else
     pass 4 "no redacted copies on the Mac"
 fi

@@ -25,7 +25,7 @@ SYSTEM = ("You are a careful general-purpose assistant running offline on the us
 HELP = """  /docs            list the files you opened and their redacted copies
   /load <n|name>   put a document's text into the conversation
   /unload          remove loaded documents
-  /redact          redact every loaded PDF not yet redacted (background); collect with `out` on the Mac
+  /redact          redact every loaded PDF and spreadsheet not yet redacted (background); collect with `out` on the Mac
   /status          is the redaction still running
   /think           turn step-by-step reasoning on or off (better answers, several times slower)
   /clear           start a fresh conversation
@@ -71,6 +71,13 @@ def load(arg):
     if pick.lower().endswith(".pdf"):
         doc = fitz.open(os.path.join(DOCS, pick))
         text = "\n".join(f"[page {i + 1}]\n{p.get_text()}" for i, p in enumerate(doc))
+    elif pick.lower().endswith((".xlsx", ".xlsm", ".xls", ".ods", ".csv", ".tsv")):
+        from redact import sheet_text  # sheet by sheet, rows as tab-separated values
+        try:
+            text = sheet_text(os.path.join(DOCS, pick), MAX_DOC_CHARS + 1)
+        except Exception as exc:
+            print(f"  could not read this spreadsheet ({type(exc).__name__})")
+            return None
     else:
         text = open(os.path.join(DOCS, pick), encoding="utf-8", errors="replace").read()
     cut = len(text) > MAX_DOC_CHARS
@@ -102,7 +109,7 @@ def main():
             elif cmd == "/help":
                 print(HELP)
             elif cmd == "/docs":
-                red = sorted(f for f in os.listdir(OUTBOX) if f.endswith(".pdf"))
+                red = sorted(f for f in os.listdir(OUTBOX) if not f.endswith(".report.json"))
                 for i, n in enumerate(docs(), 1):
                     print(f"  {i}. {n.split('_', 2)[-1]}")
                 print(f"  redacted copies waiting to be collected: {len(red)} (nothing is redacted until `redact` is run)")
