@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(./ephemeral-llm open:*)",
+      "Bash(./ephemeral-llm chat:*)",
+      "Bash(./ephemeral-llm shell:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker cp:*)",
+      "Bash(docker attach:*)",
+      "Bash(docker logs:*)",
+      "Read(~/PrivateRedactor/**)"
+    ]
+  }
+}

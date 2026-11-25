@@ -1,0 +1,3 @@
+#!/bin/bash
+# Inside the container: start the chat with the local model.
+exec python /app/chat.py "$@"

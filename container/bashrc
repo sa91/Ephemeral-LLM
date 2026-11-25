@@ -1,0 +1,15 @@
+# Login shell inside the sealed container (docker exec ... bash --rcfile /app/bashrc).
+PS1='\[\033[1m\]sealed:\w\$\[\033[0m\] '
+cd /work
+cat <<MSG
+Sealed session: no network, nothing here touches the Mac's disk. Model: $MODEL
+  chat                start the chat with the model (/help inside it)
+  docs                list the files you loaded
+  redact              redact every loaded PDF not yet redacted (background)
+  ollama run \$MODEL   the model's own plain prompt
+  python              Python with PyMuPDF; your files are in /work/docs, notes in /work/notes
+  exit                leave; the session keeps running until you kill it from the Mac
+Redacted copies come out only from the Mac: ./ephemeral-llm out
+MSG
+# the terminal may have shown unredacted content: wipe screen and scrollback on the way out
+trap 'printf "\033[3J\033[2J\033[H"' EXIT

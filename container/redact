@@ -1,0 +1,5 @@
+#!/bin/bash
+# Inside the container: redact every loaded PDF that has not been redacted yet (runs in the background).
+python /app/redact.py queue || exit 1
+echo "Running in the background, about a minute or more per page. 'docs' shows progress."
+echo "Redacted copies leave the container only when you run on the Mac: ./ephemeral-llm out"

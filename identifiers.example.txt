@@ -1,0 +1,20 @@
+# Optional help for redaction. Copied to ~/PrivateRedactor/identifiers.txt by build.sh.
+# The patterns and the model work without it; what you fill in here is removed with certainty.
+# It is sent into the container's RAM when you log in. Keep it out of any shared folder.
+#
+# Fill in after the colon. Leave a label empty to skip it. Other lines starting with # are ignored.
+# From name and date the kit also derives: Lastname, Firstname - F. Lastname - other date formats.
+
+Firstname:
+Lastname:
+Day:
+Month:
+Year:
+
+# Anything else, one per line, with or without a label. 3 characters minimum.
+# Street:
+# Town:
+# c/o Somebody
+#
+# Regular expressions start with re:
+# re:foreign\s+tax\s+id\S*\s+\S+

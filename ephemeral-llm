@@ -1,0 +1,324 @@
+#!/bin/bash
+# Host CLI for the sealed redaction session. See README.md.
+set -euo pipefail
+KIT="$(cd "$(dirname "$0")" && pwd)"
+. "$KIT/config.sh"
+umask 077
+
+die() { echo "ephemeral-llm: $*" >&2; exit 1; }
+log() { mkdir -p "$EVIDENCE"; echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "$EVIDENCE/host.log"; }
+need_docker() { docker info >/dev/null 2>&1 || die "Docker is not running. Start it with: colima start"; }
+running() { [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; }
+need_session() { need_docker; running || die "no session is running"; }
+cx() { docker exec "$CONTAINER" "$@"; }
+
+# open, chat and shell show unredacted content: a person at a terminal only.
+human_only() {
+    if [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ] || [ ! -t 0 ] || [ ! -t 1 ]; then
+        die "'$1' handles unredacted content and only runs in your own terminal (not from Claude Code, not piped)"
+    fi
+}
+
+session_file() { echo "$EVIDENCE/session.current"; }
+session_id() { cat "$(session_file)" 2>/dev/null || echo "unknown"; }
+
+start_session() {
+    docker image inspect "$IMAGE" >/dev/null 2>&1 || die "image $IMAGE not found; run ./build.sh first"
+    case "$CONTAINER" in *-selftest) ;; *)
+        docker container inspect "$CONTAINER-selftest" >/dev/null 2>&1 && die "the self-test is running (about 2 minutes); try again when it has finished" ;;
+    esac
+    if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+        docker rm -f "$CONTAINER" >/dev/null   # a stopped leftover
+    fi
+    mkdir -p "$EVIDENCE"
+    date +%Y%m%d-%H%M%S > "$(session_file)"
+    docker run -d --name "$CONTAINER" --label "$LABEL=1" \
+        --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+        --pids-limit 512 --memory "$CONTAINER_MEM" --memory-swap "$CONTAINER_MEM" \
+        --tmpfs "/work:rw,noexec,nosuid,nodev,size=$WORK_SIZE,uid=10001,gid=10001,mode=0700" \
+        --tmpfs "/tmp:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700" \
+        --log-opt max-size=1m -e NUM_CTX="$NUM_CTX" "$IMAGE" >/dev/null
+
+    # Prove the seal from outside before any file goes in.
+    local got want
+    got="$(docker container inspect -f '{{.HostConfig.NetworkMode}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{len .Mounts}}|{{len .HostConfig.Binds}}|{{len .NetworkSettings.Ports}}|{{len .HostConfig.PortBindings}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Privileged}}|{{.Config.User}}|{{json .HostConfig.CapDrop}}' "$CONTAINER")"
+    want='none|none,|0|0|0|0|true|false|10001|["ALL"]'
+    if [ "$got" != "$want" ]; then
+        docker rm -f "$CONTAINER" >/dev/null
+        log "REFUSED session=$(session_id) inspect=$got"
+        die "container is not sealed as required (got: $got); removed it"
+    fi
+    log "START session=$(session_id) network=none host folders=0 ports=0 read-only=true caps=none user=10001 mem=$CONTAINER_MEM swap=off"
+    echo "sealed: network=none, host folders=0, ports=0, read-only, no capabilities"
+
+    printf "starting model"
+    local i
+    for i in $(seq 1 180); do
+        if cx test -f /work/.ready 2>/dev/null; then echo " ready"; return 0; fi
+        running || { echo; docker logs "$CONTAINER" 2>&1 | tail -5; die "container stopped during start"; }
+        printf "."; sleep 1
+    done
+    echo; die "model did not become ready in 3 minutes (see: docker logs $CONTAINER)"
+}
+
+# send_files <file>...   stream files into container RAM; nothing is copied on the Mac
+send_files() {
+    local stage n=0 f abs
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/ellm.XXXXXX")"
+    for f in "$@"; do
+        n=$((n + 1))
+        abs="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
+        ln -s "$abs" "$stage/$(printf '%03d' "$n")_$(basename "$f")"
+        # size + fingerprint only (no names), for the purge report's search for stray copies
+        echo "$(shasum -a 256 < "$abs" | awk '{print $1}') $(stat -f %z "$abs")" >> "$EVIDENCE/inputs_$(session_id).sha256"
+    done
+    COPYFILE_DISABLE=1 tar -chf - --no-xattrs --no-mac-metadata -C "$stage" . \
+        | docker exec -i "$CONTAINER" tar -xf - -C /work/staging --no-same-owner --no-same-permissions
+    rm -rf "$stage"
+    cx python /app/redact.py ingest
+    log "IN session=$(session_id) files=$n"
+}
+
+send_identifiers() { docker exec -i "$CONTAINER" sh -c 'cat > /work/staging/.identifiers' < "$1"; }
+
+wait_idle() {
+    local st last=""
+    while :; do
+        running || { docker logs "$CONTAINER" 2>&1 | tail -5; die "container stopped"; }
+        st="$(cx python /app/redact.py status)"
+        case "$st" in "model: idle; waiting=0 "*) return 0 ;; esac
+        [ "$st" = "$last" ] || echo "  $st"
+        last="$st"; sleep 3
+    done
+}
+
+# Log into the container: a bash prompt in /work, where `chat` starts the chat.
+# Number of lines in the identifiers list that will be used (count only; values are never printed).
+# Same rules as container/redact.py: bare or labelled lines, plus known labels filled in behind a "#".
+list_count() {
+    [ -f "$IDENTIFIERS" ] || { echo 0; return; }
+    awk 'BEGIN { IGNORECASE = 1; n = 0 }
+         { l = tolower($0) }
+         l ~ /^[[:space:]]*$/ { next }
+         l ~ /^[[:space:]]*#/ {
+             if (l ~ /^[[:space:]]*#+[[:space:]]*(first|given|fore|last|sur|family|day|month|year|dob|date *of *birth|birth|street|town|city|post *code|zip|address|e-?mail|phone)[a-z ._\/-]*[:=][[:space:]]*[^[:space:]]/) n++
+             next }
+         l ~ /^[^:=]*[:=][[:space:]]*$/ { next }
+         { n++ }
+         END { print n }' "$IDENTIFIERS"
+}
+
+# so that `redact` typed inside the session uses your current list
+sync_identifiers() {
+    if [ "$(list_count)" -gt 0 ]; then
+        send_identifiers "$IDENTIFIERS"
+    else
+        echo "Note: $IDENTIFIERS has no filled-in lines. Redaction will rely on the patterns and the model alone."
+    fi
+}
+login() { sync_identifiers; docker exec -it "$CONTAINER" bash --rcfile /app/bashrc -i || true; }
+
+# collect_files <exts-regex> <path>...   fills FILES with matching files; folders are searched
+collect_files() {
+    local exts="$1" a f; shift
+    FILES=()
+    for a in "$@"; do
+        if [ -d "$a" ]; then
+            while IFS= read -r -d '' f; do
+                echo "$f" | grep -qiE "\.($exts)$" && FILES+=("$f")
+            done < <(find "$a" -type f -print0)
+        elif [ -f "$a" ]; then
+            echo "$a" | grep -qiE "\.($exts)$" || die "not a supported file type (.${exts//|/, .}): $a"
+            FILES+=("$a")
+        else
+            die "not found: $a"
+        fi
+    done
+}
+
+outputs_on_mac() { find "$OUT_DIR" -maxdepth 1 -type f -name 'REDACTED_*.pdf' -user "$(id -un)" 2>/dev/null; }
+
+cmd_open() {
+    human_only open
+    need_docker
+    collect_files 'pdf|txt|md|csv|zip' "$@"
+    running || start_session
+    if [ ${#FILES[@]} -ge 1 ]; then
+        send_files "${FILES[@]}"
+        echo "Nothing is redacted until 'redact' is run."
+    fi
+    login
+    echo "Session still running. Redact the loaded PDFs: ./ephemeral-llm redact   End it: ./ephemeral-llm kill"
+}
+
+# Is someone logged in or chatting right now? (process list only; shows no content)
+session_in_use() { docker top "$CONTAINER" -eo args 2>/dev/null | grep -qE 'bashrc|chat\.py|ollama run'; }
+
+# redact [pdf or folder ...]   One go: start the session if needed, load the given PDFs, redact every
+# loaded PDF not yet redacted, and write the redacted copies into /tmp. Shows no document content.
+cmd_redact() {
+    need_docker
+    if [ $# -ge 1 ]; then
+        collect_files 'pdf|zip' "$@"
+        [ ${#FILES[@]} -ge 1 ] || die "no PDFs or zip files found"
+        running || start_session
+        send_files "${FILES[@]}"
+    else
+        running || die "no session is running; give the PDFs to redact: ./ephemeral-llm redact <file.pdf> ..."
+    fi
+    sync_identifiers
+    cx python /app/redact.py queue
+    log "REDACT session=$(session_id)"
+    cmd_out
+    # Always end the session when redaction is done; kill waits until nobody is using it.
+    echo "Redaction done; ending the session (waits if you are logged in)."
+    cmd_kill
+}
+
+cmd_out() {
+    need_session
+    wait_idle
+    local stage rc=0 f n=0
+    stage="$(mktemp -d "$OUT_DIR/ellm-out.XXXXXX")"      # mode 700, ours
+    cx tar -cf - -C /work/redacted . | tar -xf - -C "$stage" --no-same-owner
+    find "$stage" ! -type f ! -type d -delete            # only plain files may come out
+    cx python /app/redact.py summary || rc=$?
+    cx sh -c 'rm -f /work/redacted/*'
+    if [ -n "${KEEP_STAGE:-}" ]; then                    # self-test: keep its output apart from yours
+        LAST_DEST="$stage"
+    else
+        mkdir -p "$REPORTS"
+        for f in "$stage"/*.pdf; do
+            [ -f "$f" ] || continue
+            chmod 600 "$f"; mv -f "$f" "$OUT_DIR/"; n=$((n + 1))
+            echo "redacted copy: /tmp/$(basename "$f")"
+        done
+        for f in "$stage"/*.json; do [ -f "$f" ] && mv -f "$f" "$REPORTS/"; done
+        rm -rf "$stage"
+        [ "$n" -gt 0 ] || echo "no new redacted copies"
+    fi
+    log "OUT session=$(session_id) files=$n warnings=$rc"
+    if [ "$rc" -ne 0 ]; then
+        echo "WARNING: at least one file needs a closer look (see lines above)."
+    fi
+    echo "Review every PDF yourself in Preview before sharing it: the checks only prove that what was FOUND is gone."
+    return 0
+}
+
+cmd_clean() {
+    need_docker
+    if running; then
+        cx python /app/redact.py clean
+        log "CLEAN session=$(session_id) container"
+    else
+        echo "no session is running (nothing in the container to clean)"
+    fi
+    if [ "${1:-}" = "--host" ]; then
+        outputs_on_mac | while IFS= read -r f; do rm -f "$f"; done
+        echo "CLEAN: /tmp/REDACTED_*.pdf deleted on the Mac"
+        log "CLEAN host outputs"
+    fi
+}
+
+# Idle = nothing queued or being redacted, and nobody logged in or chatting.
+session_idle() {
+    case "$(cx python /app/redact.py status 2>/dev/null)" in "model: idle; waiting=0 "*) ;; *) return 1 ;; esac
+    ! session_in_use
+}
+
+# kill [--force] [--outputs]   Waits until the session is idle, then destroys it. --force ends it at once.
+cmd_kill() {
+    need_docker
+    local force=0 pass=() a said=0
+    for a in "$@"; do
+        if [ "$a" = "--force" ]; then force=1; else pass+=("$a"); fi
+    done
+    local sid; sid="$(session_id)"
+    if running && [ "$force" = 0 ]; then
+        # idle on two checks in a row, so a moment between two commands does not count as idle
+        until session_idle && sleep 5 && session_idle; do
+            if [ "$said" = 0 ]; then
+                echo "Session is in use (someone is logged in, or redaction is running). Waiting until it is idle."
+                echo "To end it now instead: ./ephemeral-llm kill --force"
+                said=1
+            fi
+            running || break
+            sleep 10
+        done
+        # redacted copies not collected yet would be lost: bring them out first
+        if running && [ "$(cx python /app/redact.py status | sed 's/.*redacted=\([0-9]*\).*/\1/')" != "0" ]; then
+            echo "Collecting redacted copies that were still inside:"
+            cmd_out
+        fi
+    fi
+    if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
+        docker logs "$CONTAINER" > "$EVIDENCE/container_$sid.log" 2>&1 || true   # no names or content in it
+        docker rm -f "$CONTAINER" >/dev/null
+        log "KILL session=$sid force=$force"
+        echo "session destroyed"
+    else
+        echo "no session container existed"
+    fi
+    SESSION="$sid" "$KIT/verify_purge.sh" ${pass[@]+"${pass[@]}"}
+    rm -f "$(session_file)"
+}
+
+cmd_chat()  { human_only chat;  need_session; sync_identifiers; docker exec -it "$CONTAINER" python /app/chat.py; }
+cmd_shell() { human_only shell; need_session; login; }
+
+cmd_status() {
+    need_docker
+    if running; then
+        echo "running: session $(session_id), network=$(docker container inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER"), model $(cx printenv MODEL)"
+        cx python /app/redact.py status
+        if session_in_use; then echo "in use: someone is logged in or chatting"; else echo "in use: no (nobody logged in)"; fi
+    else
+        echo "not running"
+    fi
+    echo "identifiers list: $(list_count) filled-in lines (plain comments and labels left empty do not count)"
+    echo "redacted copies on the Mac: $(outputs_on_mac | wc -l | tr -d ' ') as /tmp/REDACTED_*.pdf"
+}
+
+# End-to-end check with an invented statement. Safe for anyone (and Claude Code) to run.
+cmd_selftest() {
+    need_docker
+    docker container inspect "$CONTAINER" >/dev/null 2>&1 && die "a session exists; run ./ephemeral-llm kill first"
+    # its own container name, so an `open` typed meanwhile can never load real files into the test
+    export CONTAINER="$CONTAINER-selftest"
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    local tmp ok=1
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/ellm-selftest.XXXXXX")"
+    # labelled and bare lines mixed, as a real list may be
+    printf '%s\n' "# Full name, each order and spelling in use" "# Firstname:  Jonas" "# Lastname: Testmann" "# Street 12" "# Day: 14" "# Month: March" "# Year: 1987" "Address:" "Musterweg 12" "8001 Zurich" > "$tmp/identifiers.txt"
+    start_session
+    cx python /app/selftest.py make /tmp/selftest.pdf
+    cx cat /tmp/selftest.pdf > "$tmp/statement_12345678_Jonas Testmann.pdf"
+    cx rm /tmp/selftest.pdf
+    send_files "$tmp/statement_12345678_Jonas Testmann.pdf"
+    [ "$(cx python /app/redact.py status | sed 's/.*redacted=\([0-9]*\).*/\1/')" = "0" ] || { echo "open redacted without being asked"; ok=0; }
+    cx bash -c 'command -v chat >/dev/null && command -v docs >/dev/null && test -x /app/redact && test -r /app/bashrc' || { echo "login commands missing in the container"; ok=0; }
+    if [ "${1:-}" = "--no-list" ]; then
+        echo "running WITHOUT an identifiers list: this measures the patterns and the model alone"
+    else
+        send_identifiers "$tmp/identifiers.txt"
+    fi
+    cx /app/redact
+    local t0; t0=$(date +%s)
+    wait_idle
+    echo "redaction took $(( $(date +%s) - t0 ))s for 1 page"
+    cx sh -c 'python /app/selftest.py check /work/redacted/REDACTED_*.pdf' || ok=0
+    KEEP_STAGE=1 cmd_out
+    if [ "${1:-}" != "--no-list" ] && ls "$LAST_DEST" | grep -qE '12345678|Testmann'; then echo "file name leaks an identifier"; ok=0; fi
+    grep -rqE 'Testmann|12345678|Musterweg' "$LAST_DEST"/*.json && { echo "report leaks an identifier"; ok=0; }
+    cmd_clean
+    rm -rf "$LAST_DEST" "$tmp"
+    cmd_kill | tee "$EVIDENCE/selftest_last.txt"
+    grep -q "RESULT: PURGED" "$EVIDENCE/selftest_last.txt" || ok=0
+    if [ "$ok" = 1 ]; then echo "SELFTEST PASSED"; else echo "SELFTEST FAILED"; exit 1; fi
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+    open|redact|out|clean|kill|chat|shell|status|selftest) "cmd_$cmd" "$@" ;;
+    *) echo "usage: ephemeral-llm {open [file|folder]...|redact [pdf|folder]...|out|clean [--host]|kill [--force] [--outputs]|chat|shell|status|selftest}"; exit 2 ;;
+esac
