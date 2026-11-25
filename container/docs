@@ -2,5 +2,5 @@
 # Inside the container: list loaded files and where things are.
 echo "loaded files (/work/docs):"
 ls -1 /work/docs 2>/dev/null | cut -d_ -f3- | nl -w3 -s'. '
-echo "redacted copies waiting to be collected (/work/redacted): $(ls -1 /work/redacted 2>/dev/null | grep -c '\.pdf$')"
+echo "redacted copies waiting to be collected (/work/redacted): $(ls -1 /work/redacted 2>/dev/null | grep -vc '\.report\.json$')"
 echo "saved notes (/work/notes): $(ls -1 /work/notes 2>/dev/null | wc -l | tr -d ' ')"

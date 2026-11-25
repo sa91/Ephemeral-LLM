@@ -20,6 +20,14 @@ RUN mkdir -p /opt/models \
  && ollama pull "${MODEL}" \
  && chmod -R a+rX /opt/models && rm -f /tmp/pull.log
 
+# Spreadsheet libraries. Kept below the model layer on purpose: anything changed above it
+# makes Docker download the 6.6 GB model again.
+ARG OPENPYXL_VERSION=3.1.5
+ARG ET_XMLFILE_VERSION=2.0.0
+ARG CALAMINE_VERSION=0.9.1
+RUN /opt/venv/bin/pip install --no-cache-dir "openpyxl==${OPENPYXL_VERSION}" \
+      "et-xmlfile==${ET_XMLFILE_VERSION}" "python-calamine==${CALAMINE_VERSION}"
+
 RUN useradd --uid 10001 --no-create-home --shell /bin/bash redactor
 COPY --chmod=0555 entrypoint.sh redact.py chat.py selftest.py chat docs redact bashrc /app/
 

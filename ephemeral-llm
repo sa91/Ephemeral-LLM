@@ -136,35 +136,35 @@ collect_files() {
     done
 }
 
-outputs_on_mac() { find "$OUT_DIR" -maxdepth 1 -type f -name 'REDACTED_*.pdf' -user "$(id -un)" 2>/dev/null; }
+outputs_on_mac() { find "$OUT_DIR" -maxdepth 1 -type f -name 'REDACTED_*' \( -name '*.pdf' -o -name '*.xlsx' -o -name '*.csv' -o -name '*.tsv' \) -user "$(id -un)" 2>/dev/null; }
 
 cmd_open() {
     human_only open
     need_docker
-    collect_files 'pdf|txt|md|csv|zip' "$@"
+    collect_files 'pdf|xlsx|xlsm|xls|ods|csv|tsv|txt|md|zip' "$@"
     running || start_session
     if [ ${#FILES[@]} -ge 1 ]; then
         send_files "${FILES[@]}"
         echo "Nothing is redacted until 'redact' is run."
     fi
     login
-    echo "Session still running. Redact the loaded PDFs: ./ephemeral-llm redact   End it: ./ephemeral-llm kill"
+    echo "Session still running. Redact the loaded PDFs and spreadsheets: ./ephemeral-llm redact   End it: ./ephemeral-llm kill"
 }
 
 # Is someone logged in or chatting right now? (process list only; shows no content)
 session_in_use() { docker top "$CONTAINER" -eo args 2>/dev/null | grep -qE 'bashrc|chat\.py|ollama run'; }
 
-# redact [pdf or folder ...]   One go: start the session if needed, load the given PDFs, redact every
-# loaded PDF not yet redacted, and write the redacted copies into /tmp. Shows no document content.
+# redact [file or folder ...]   One go: start the session if needed, load the given PDFs and spreadsheets,
+# redact every loaded one not yet redacted, and write the redacted copies into /tmp. Shows no document content.
 cmd_redact() {
     need_docker
     if [ $# -ge 1 ]; then
-        collect_files 'pdf|zip' "$@"
-        [ ${#FILES[@]} -ge 1 ] || die "no PDFs or zip files found"
+        collect_files 'pdf|xlsx|xlsm|xls|ods|csv|tsv|zip' "$@"
+        [ ${#FILES[@]} -ge 1 ] || die "no PDFs, spreadsheets or zip files found"
         running || start_session
         send_files "${FILES[@]}"
     else
-        running || die "no session is running; give the PDFs to redact: ./ephemeral-llm redact <file.pdf> ..."
+        running || die "no session is running; give the files to redact: ./ephemeral-llm redact <file.pdf|file.xlsx> ..."
     fi
     sync_identifiers
     cx python /app/redact.py queue
@@ -188,7 +188,7 @@ cmd_out() {
         LAST_DEST="$stage"
     else
         mkdir -p "$REPORTS"
-        for f in "$stage"/*.pdf; do
+        for f in "$stage"/*.pdf "$stage"/*.xlsx "$stage"/*.csv "$stage"/*.tsv; do
             [ -f "$f" ] || continue
             chmod 600 "$f"; mv -f "$f" "$OUT_DIR/"; n=$((n + 1))
             echo "redacted copy: /tmp/$(basename "$f")"
@@ -201,7 +201,7 @@ cmd_out() {
     if [ "$rc" -ne 0 ]; then
         echo "WARNING: at least one file needs a closer look (see lines above)."
     fi
-    echo "Review every PDF yourself in Preview before sharing it: the checks only prove that what was FOUND is gone."
+    echo "Review every file yourself before sharing it (PDFs in Preview, spreadsheets in Numbers or Excel, hidden sheets too): the checks only prove that what was FOUND is gone."
     return 0
 }
 
@@ -215,7 +215,7 @@ cmd_clean() {
     fi
     if [ "${1:-}" = "--host" ]; then
         outputs_on_mac | while IFS= read -r f; do rm -f "$f"; done
-        echo "CLEAN: /tmp/REDACTED_*.pdf deleted on the Mac"
+        echo "CLEAN: /tmp/REDACTED_* (pdf, xlsx, csv, tsv) deleted on the Mac"
         log "CLEAN host outputs"
     fi
 }
@@ -276,7 +276,7 @@ cmd_status() {
         echo "not running"
     fi
     echo "identifiers list: $(list_count) filled-in lines (plain comments and labels left empty do not count)"
-    echo "redacted copies on the Mac: $(outputs_on_mac | wc -l | tr -d ' ') as /tmp/REDACTED_*.pdf"
+    echo "redacted copies on the Mac: $(outputs_on_mac | wc -l | tr -d ' ') as /tmp/REDACTED_* (pdf, xlsx, csv, tsv)"
 }
 
 # End-to-end check with an invented statement. Safe for anyone (and Claude Code) to run.
@@ -291,10 +291,13 @@ cmd_selftest() {
     # labelled and bare lines mixed, as a real list may be
     printf '%s\n' "# Full name, each order and spelling in use" "# Firstname:  Jonas" "# Lastname: Testmann" "# Street 12" "# Day: 14" "# Month: March" "# Year: 1987" "Address:" "Musterweg 12" "8001 Zurich" > "$tmp/identifiers.txt"
     start_session
-    cx python /app/selftest.py make /tmp/selftest.pdf
-    cx cat /tmp/selftest.pdf > "$tmp/statement_12345678_Jonas Testmann.pdf"
-    cx rm /tmp/selftest.pdf
-    send_files "$tmp/statement_12345678_Jonas Testmann.pdf"
+    local e
+    for e in pdf xlsx csv; do
+        cx python /app/selftest.py make "/tmp/selftest.$e"
+        cx cat "/tmp/selftest.$e" > "$tmp/statement_12345678_Jonas Testmann.$e"
+        cx rm "/tmp/selftest.$e"
+    done
+    send_files "$tmp/statement_12345678_Jonas Testmann.pdf" "$tmp/statement_12345678_Jonas Testmann.xlsx" "$tmp/statement_12345678_Jonas Testmann.csv"
     [ "$(cx python /app/redact.py status | sed 's/.*redacted=\([0-9]*\).*/\1/')" = "0" ] || { echo "open redacted without being asked"; ok=0; }
     cx bash -c 'command -v chat >/dev/null && command -v docs >/dev/null && test -x /app/redact && test -r /app/bashrc' || { echo "login commands missing in the container"; ok=0; }
     if [ "${1:-}" = "--no-list" ]; then
@@ -305,11 +308,13 @@ cmd_selftest() {
     cx /app/redact
     local t0; t0=$(date +%s)
     wait_idle
-    echo "redaction took $(( $(date +%s) - t0 ))s for 1 page"
-    cx sh -c 'python /app/selftest.py check /work/redacted/REDACTED_*.pdf' || ok=0
+    echo "redaction took $(( $(date +%s) - t0 ))s for 1 page, 1 workbook of 2 sheets and 1 csv"
+    for e in pdf xlsx csv; do
+        cx sh -c "python /app/selftest.py check /work/redacted/REDACTED_*.$e" || ok=0
+    done
     KEEP_STAGE=1 cmd_out
     if [ "${1:-}" != "--no-list" ] && ls "$LAST_DEST" | grep -qE '12345678|Testmann'; then echo "file name leaks an identifier"; ok=0; fi
-    grep -rqE 'Testmann|12345678|Musterweg' "$LAST_DEST"/*.json && { echo "report leaks an identifier"; ok=0; }
+    grep -rqE 'Testmann|12345678|70553318|Musterweg' "$LAST_DEST"/*.json && { echo "report leaks an identifier"; ok=0; }
     cmd_clean
     rm -rf "$LAST_DEST" "$tmp"
     cmd_kill | tee "$EVIDENCE/selftest_last.txt"
@@ -320,5 +325,5 @@ cmd_selftest() {
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
     open|redact|out|clean|kill|chat|shell|status|selftest) "cmd_$cmd" "$@" ;;
-    *) echo "usage: ephemeral-llm {open [file|folder]...|redact [pdf|folder]...|out|clean [--host]|kill [--force] [--outputs]|chat|shell|status|selftest}"; exit 2 ;;
+    *) echo "usage: ephemeral-llm {open [file|folder]...|redact [file|folder]...|out|clean [--host]|kill [--force] [--outputs]|chat|shell|status|selftest}"; exit 2 ;;
 esac

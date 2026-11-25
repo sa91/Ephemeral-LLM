@@ -5,9 +5,9 @@ cat <<MSG
 Sealed session: no network, nothing here touches the Mac's disk. Model: $MODEL
   chat                start the chat with the model (/help inside it)
   docs                list the files you loaded
-  redact              redact every loaded PDF not yet redacted (background)
+  redact              redact every loaded PDF and spreadsheet not yet redacted (background)
 $( [ "${LLM_API:-ollama}" = "openai" ] || echo "  ollama run \$MODEL   the model's own plain prompt" )
-  python              Python with PyMuPDF; your files are in /work/docs, notes in /work/notes
+  python              Python with PyMuPDF and openpyxl; your files are in /work/docs, notes in /work/notes
   exit                leave; the session keeps running until you kill it from the Mac
 Redacted copies come out only from the Mac: ./ephemeral-llm out
 MSG

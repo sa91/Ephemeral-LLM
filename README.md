@@ -36,14 +36,14 @@ Run `open` in Terminal.app, not in the Claude app's terminal panel (Claude can r
 ./ephemeral-llm open
 ```
 
-Both log you into the container: a bash prompt in `/work`. The first also loads PDFs (and txt, md, csv)
-into `/work/docs`. Inside:
+Both log you into the container: a bash prompt in `/work`. The first also loads PDFs, spreadsheets
+(xlsx, xlsm, xls, ods, csv, tsv) and txt, md into `/work/docs`. Inside:
 
 - `chat` starts the chat with the model (`/docs`, `/load 1`, `/think`, `/save`, `/exit` to return to the prompt)
 - `docs` lists what is loaded
-- `redact` (or `/redact` inside the chat) redacts every loaded PDF not yet redacted, in the background;
+- `redact` (or `/redact` inside the chat) redacts every loaded PDF and spreadsheet not yet redacted, in the background;
   the copies stay inside until you run `./ephemeral-llm out` on the Mac
-- `ollama run $MODEL`, `python` (with PyMuPDF) and the usual shell tools are there for anything else
+- `ollama run $MODEL`, `python` (with PyMuPDF, openpyxl) and the usual shell tools are there for anything else
 - `exit` logs out and wipes the terminal
 
 Logging out keeps the session and its files; `open` or `shell` logs you back in.
@@ -51,10 +51,11 @@ Logging out keeps the session and its files; `open` or `shell` logs you back in.
 To redact in one go, with or without a session running, give the files (or ask Claude Code to):
 
 ```bash
-./ephemeral-llm redact ~/Downloads/a.pdf ~/Downloads/b.pdf
+./ephemeral-llm redact ~/Downloads/a.pdf ~/Downloads/b.xlsx
 ```
 
-The redacted copies appear as `/tmp/REDACTED_<n>_<name>.pdf`. Review each in Preview. When you are finished with the model:
+The redacted copies appear as `/tmp/REDACTED_<n>_<name>.pdf` (`.xlsx`, `.csv`, `.tsv` for spreadsheets). Review each: PDFs in Preview,
+spreadsheets in Numbers or Excel, hidden sheets included. When you are finished with the model:
 
 ```bash
 ./ephemeral-llm kill
@@ -63,23 +64,44 @@ The redacted copies appear as `/tmp/REDACTED_<n>_<name>.pdf`. Review each in Pre
 | Command | What it does |
 |---|---|
 | `open [file or folder] ...` | starts the sealed session if needed, streams the files into container RAM, logs you into the container. Redacts nothing. Your terminal only. |
-| `redact [pdf or folder] ...` | one go: starts the session if needed, loads the given PDFs, redacts every loaded PDF not yet redacted, and writes the copies into `/tmp` as `REDACTED_*.pdf`. A `.zip` is unpacked inside the container, in RAM, and every PDF in it is redacted; password-protected zips and zips inside zips are refused. With no paths, redacts what is already loaded. When done it runs `kill`, which waits until nobody is logged in. |
+| `redact [file or folder] ...` | one go: starts the session if needed, loads the given PDFs and spreadsheets, redacts every loaded one not yet redacted, and writes the copies into `/tmp` as `REDACTED_*` (pdf, xlsx, csv, tsv). A `.zip` is unpacked inside the container, in RAM, and every PDF and spreadsheet in it is redacted; password-protected zips and zips inside zips are refused. With no paths, redacts what is already loaded. When done it runs `kill`, which waits until nobody is logged in. |
 | `out` | collects redacted copies again without queueing anything |
-| `clean [--host]` | empties the container work area; `--host` also deletes `/tmp/REDACTED_*.pdf` |
-| `kill [--force] [--outputs]` | waits until the session is idle (nothing being redacted, nobody logged in or chatting), collects any redacted copies still inside, then removes the container and writes `~/PrivateRedactor/evidence/PURGE_REPORT_<time>.txt`. `--force` ends it at once; `--outputs` also deletes `/tmp/REDACTED_*.pdf`. |
+| `clean [--host]` | empties the container work area; `--host` also deletes the `/tmp/REDACTED_*` copies (pdf, xlsx, csv, tsv) |
+| `kill [--force] [--outputs]` | waits until the session is idle (nothing being redacted, nobody logged in or chatting), collects any redacted copies still inside, then removes the container and writes `~/PrivateRedactor/evidence/PURGE_REPORT_<time>.txt`. `--force` ends it at once; `--outputs` also deletes the `/tmp/REDACTED_*` copies. |
 | `shell` | log back into the running session without loading anything. Your terminal only. |
 | `chat` | go straight into the chat from the Mac. Your terminal only. |
 | `status` | running, network mode, model busy/idle, file counts |
-| `selftest` | full run on an invented statement in its own container: load, redact, out, clean, kill, purge report. `open` is refused while it runs. |
+| `selftest` | full run on an invented statement (a PDF, an xlsx with a hidden sheet, a csv) in its own container: load, redact, out, clean, kill, purge report. `open` is refused while it runs. |
 
 ## Reading the redaction summary
 
 - `ok` - nothing found again in the output, by text search or by OCR of the rendered pages.
-- `WARNING ... CHECK` - a scan, a page where the model failed, or OCR still reads something identifier-like. Look at that file.
+- `WARNING ... CHECK` - a scan, a page where the model failed, OCR still reads something identifier-like, or a workbook had images, charts or pivot tables (they are left out of the copy). Look at that file.
 - `FAILED` - identifier text was still in the saved file. The output was withheld and never left the container.
 
 `ok` means everything that was *found* is gone. It cannot mean nothing was *missed*. Your review in Preview is the
 last check; add misses to `identifiers.txt`, `open` the file again and redact again.
+
+## Spreadsheets
+
+`.xlsx`, `.xlsm`, `.xls`, `.ods`, `.csv` and `.tsv` are redacted cell by cell; in `pages=` the summary shows the number of sheets
+and in `boxes=` the number of replacements. A removed value becomes `[REDACTED]`, the rest of the cell stays.
+
+- Text cells: the patterns, your list and the model, as for PDFs. A label reaches a number in the next cell of the row or under
+  it in the column ("Account Number" beside or above the value), and a name split over two columns is found.
+- Whole numbers with 7 or more digits are removed, unless the column label above them reads like money or a quantity (amount,
+  balance, value, total, price, qty, quantity, shares, betrag, saldo, kurs, wert, usd, chf, eur, gbp). Decimals are never touched.
+  A large whole-number amount under a header that is not in that list is removed; an account number under a header that is in it stays.
+- Date cells are removed only if they are a date from your list or stand beside or under a birth-date label; transaction dates stay.
+- Sheet names, comments, link targets, headers and footers, defined names and input rules are redacted or removed; document
+  properties and comment authors are cleared. Hidden sheets, rows and columns are treated like visible ones.
+- What the copy loses: `.xlsx`/`.xlsm` keep formatting and formulas, but not macros, images, charts, text boxes, pivot tables, links to
+  other workbooks, or the last calculated result of a formula (open the copy in Excel or Numbers to recalculate; a formula that used a
+  removed value or a renamed sheet shows an error). `.xlsm` comes out as `.xlsx`. `.xls` and `.ods` come out as a plain `.xlsx` with
+  values only. `.csv`/`.tsv` keep their delimiter and encoding.
+- The model reads each different cell value once, in parts of about 6000 characters, and at most 40 parts per file
+  (`SHEET_MODEL_CALLS`); a larger sheet gets `CHECK` and the rest is covered by the patterns and your list only. Expect a minute or two per part.
+- Password-protected workbooks cannot be opened and are reported as `FAILED`.
 
 ## The model
 
@@ -97,7 +119,7 @@ Close heavy apps during a session: the VM may use up to 12 of the Mac's 16 GB.
   forbids the rest, and `.claude/settings.json` denies those commands. A long-lived session widens this window:
   `kill` when you are done with the files.
 - Loaded files, the chat and saved notes stay in container RAM until `clean` or `kill`.
-- Only PDFs can be redacted. Other loaded files never leave the container.
+- Only PDFs and spreadsheets can be redacted. Other loaded files (txt, md) never leave the container.
 
 ## Files
 
