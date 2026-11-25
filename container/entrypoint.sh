@@ -32,7 +32,8 @@ if [ "${LLM_API:-ollama}" = "openai" ]; then
         exit 5
     fi
     # which device the model really landed on (no document content in these lines)
-    grep -iE "offloaded [0-9]+/[0-9]+ layers|using device|ggml_vulkan: [0-9]+ =" /tmp/llama.log | head -4
+    gpu="$(llama-server --list-devices 2>/dev/null | grep -iE "^ *vulkan[0-9]+:" | head -1)"
+    echo "model device:${gpu:- none found, running on CPU}"
 else
     ollama serve >/tmp/ollama.log 2>&1 &
     for i in $(seq 1 120); do

@@ -54,7 +54,13 @@ start_session() {
     printf "starting model"
     local i
     for i in $(seq 1 180); do
-        if cx test -f /work/.ready 2>/dev/null; then echo " ready"; return 0; fi
+        if cx test -f /work/.ready 2>/dev/null; then
+            echo " ready"
+            if [ "$EXPECT_DEVICES" != "0" ]; then   # GPU variant: say where the model really landed
+                docker logs "$CONTAINER" 2>&1 | grep -E "^model device:" | sed 's/^/  /' | head -1 || true
+            fi
+            return 0
+        fi
         running || { echo; docker logs "$CONTAINER" 2>&1 | tail -5; die "container stopped during start"; }
         printf "."; sleep 1
     done
