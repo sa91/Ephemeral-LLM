@@ -1,8 +1,15 @@
 # Shared settings for build.sh, ephemeral-llm and verify_purge.sh. Sourced, not run.
 
-IMAGE="ephemeral-llm:latest"
+IMAGE="${IMAGE:-ephemeral-llm:latest}"
 CONTAINER="${CONTAINER:-ephemeral-llm}"
 LABEL="org.ephemeral-llm.session"
+
+# Which Docker VM this kit talks to. Pinned by name, so starting another Colima profile
+# (the GPU one) cannot silently redirect the CPU kit. ephemeral-llm-gpu overrides these.
+export DOCKER_CONTEXT="${DOCKER_CONTEXT:-colima}"
+DOCKERFILE="${DOCKERFILE:-Dockerfile}"
+EXTRA_RUN_ARGS="${EXTRA_RUN_ARGS:-}"      # extra `docker run` flags (the GPU device)
+EXPECT_DEVICES="${EXPECT_DEVICES:-0}"     # how many host devices the sealed container may have
 
 # Model baked into the image. Largest current Qwen that fits a 16 GB Mac inside the VM (6.6 GB of weights).
 # Faster and weaker: MODEL=qwen3.5:4b-q4_K_M ./build.sh

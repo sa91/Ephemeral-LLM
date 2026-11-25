@@ -18,7 +18,7 @@ else
     echo "base image pinned to $BASE (delete container/base.lock to move to a newer one)"
 fi
 
-docker build --build-arg BASE="$BASE" --build-arg MODEL="$MODEL" -t "$IMAGE" "$KIT/container"
+docker build -f "$KIT/container/$DOCKERFILE" ${BUILD_EXTRA_ARGS:-} --build-arg BASE="$BASE" --build-arg MODEL="$MODEL" -t "$IMAGE" "$KIT/container"
 
 umask 077
 mkdir -p "$HOST_DIR" "$EVIDENCE"

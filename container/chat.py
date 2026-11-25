@@ -12,6 +12,7 @@ import fitz
 WORK = os.environ.get("WORK", "/work")
 DOCS, OUTBOX, NOTES = f"{WORK}/docs", f"{WORK}/redacted", f"{WORK}/notes"
 OLLAMA = "http://127.0.0.1:11434"
+LLM_API = os.environ.get("LLM_API", "ollama")  # "openai" = llama-server in the GPU image
 MODEL = os.environ.get("MODEL", "qwen3.5:9b-q4_K_M")
 NUM_CTX = int(os.environ.get("NUM_CTX", "16384"))
 MAX_DOC_CHARS = 40000
@@ -37,7 +38,31 @@ def docs():
     return sorted(os.listdir(DOCS))
 
 
+def stream_openai(messages, think):
+    body = json.dumps({"model": MODEL, "stream": True, "messages": messages,
+                       "chat_template_kwargs": {"enable_thinking": think}}).encode()
+    req = urllib.request.Request(f"{OLLAMA}/v1/chat/completions", body, {"Content-Type": "application/json"})
+    out = []
+    with urllib.request.urlopen(req, timeout=1800) as resp:
+        for line in resp:
+            line = line.decode("utf-8", "replace").strip()
+            if not line.startswith("data:") or line.endswith("[DONE]"):
+                continue
+            choices = json.loads(line[5:]).get("choices") or [{}]
+            delta = choices[0].get("delta", {})
+            if delta.get("reasoning_content"):
+                sys.stdout.write(f"\033[2m{delta['reasoning_content']}\033[0m")
+            piece = delta.get("content") or ""
+            out.append(piece)
+            sys.stdout.write(piece)
+            sys.stdout.flush()
+    print()
+    return "".join(out)
+
+
 def stream(messages, think=False):
+    if LLM_API == "openai":
+        return stream_openai(messages, think)
     body = json.dumps({"model": MODEL, "stream": True, "messages": messages, "think": think,
                        "options": {"num_ctx": NUM_CTX}}).encode()
     req = urllib.request.Request(f"{OLLAMA}/api/chat", body, {"Content-Type": "application/json"})

@@ -28,6 +28,7 @@ NOTES = f"{WORK}/notes"
 IDENTIFIERS = f"{WORK}/identifiers.txt"
 STATE = f"{WORK}/state"
 OLLAMA = "http://127.0.0.1:11434"
+LLM_API = os.environ.get("LLM_API", "ollama")  # "openai" = llama-server in the GPU image
 MODEL = os.environ.get("MODEL", "qwen3.5:9b-q4_K_M")
 NUM_CTX = int(os.environ.get("NUM_CTX", "16384"))
 OCR_LANG = os.environ.get("OCR_LANG", "eng+deu")
@@ -440,9 +441,21 @@ def ask_model(page_text, known=()):
         "messages": [{"role": "system", "content": PROMPT},
                      {"role": "user", "content": page_text[:12000]}],
     }).encode()
-    req = urllib.request.Request(f"{OLLAMA}/api/chat", body, {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=MODEL_TIMEOUT) as resp:
-        content = json.loads(resp.read())["message"]["content"]
+    if LLM_API == "openai":  # llama-server (GPU image)
+        body = json.dumps({
+            "model": MODEL, "stream": False, "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": PROMPT},
+                         {"role": "user", "content": page_text[:12000]}],
+        }).encode()
+        req = urllib.request.Request(f"{OLLAMA}/v1/chat/completions", body, {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=MODEL_TIMEOUT) as resp:
+            content = json.loads(resp.read())["choices"][0]["message"]["content"]
+    else:
+        req = urllib.request.Request(f"{OLLAMA}/api/chat", body, {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=MODEL_TIMEOUT) as resp:
+            content = json.loads(resp.read())["message"]["content"]
     items = json.loads(content).get("items", [])
     return [i for i in items if isinstance(i, str)]
 

@@ -1,0 +1,57 @@
+#!/bin/bash
+# GPU variant of ephemeral-llm: the same sealed session, in a second Colima VM (type krunkit) that
+# passes the Mac's GPU into the container. Only one of the two VMs fits in memory at a time.
+#
+#   ./ephemeral-llm-gpu vm-start     stop the CPU VM (only if no session is running), start the GPU VM
+#   ./ephemeral-llm-gpu vm-stop      stop the GPU VM and start the CPU VM again
+#   ./ephemeral-llm-gpu build        build the GPU image (once, online)
+#   ./ephemeral-llm-gpu gpu-info     what the model server reported about the GPU in this session
+#   ./ephemeral-llm-gpu <anything else>   same commands as ./ephemeral-llm (open, redact, kill, selftest ...)
+set -euo pipefail
+KIT="$(cd "$(dirname "$0")" && pwd)"
+
+GPU_PROFILE="gpu"
+export DOCKER_CONTEXT="colima-$GPU_PROFILE"
+export IMAGE="ephemeral-llm-gpu:latest"
+export CONTAINER="ephemeral-llm-gpu"
+export DOCKERFILE="Dockerfile.gpu"
+export EXPECT_DEVICES=1
+export EXTRA_RUN_ARGS="--device /dev/dri${GPU_GROUP:+ --group-add $GPU_GROUP}"
+
+die() { echo "ephemeral-llm-gpu: $*" >&2; exit 1; }
+session_exists() { docker --context "$1" ps -aq --filter "label=org.ephemeral-llm.session" 2>/dev/null | grep -q .; }
+vm_running() { colima status ${1:+"$1"} >/dev/null 2>&1; }
+
+case "${1:-}" in
+    vm-start)
+        if vm_running; then
+            session_exists colima && die "a session is running in the CPU VM; end it first (./ephemeral-llm kill)"
+            colima stop
+        fi
+        colima start "$GPU_PROFILE" --vm-type krunkit --cpus "${GPU_VM_CPUS:-8}" --memory "${GPU_VM_MEM:-12}" --disk 40 --mount none
+        docker context use colima >/dev/null 2>&1 || true   # leave Docker's default pointing at the CPU VM
+        ;;
+    vm-stop)
+        if vm_running "$GPU_PROFILE"; then
+            session_exists "$DOCKER_CONTEXT" && die "a GPU session is running; end it first (./ephemeral-llm-gpu kill)"
+            colima stop "$GPU_PROFILE"
+        fi
+        vm_running || colima start
+        docker context use colima >/dev/null 2>&1 || true
+        ;;
+    build)
+        lock="$KIT/container/gpu-base.lock"
+        if [ ! -s "$lock" ]; then
+            docker pull "${GPU_BASE_TAG:-quay.io/ramalama/ramalama:latest}"
+            docker image inspect -f '{{index .RepoDigests 0}}' "${GPU_BASE_TAG:-quay.io/ramalama/ramalama:latest}" > "$lock"
+        fi
+        echo "GPU base image pinned: $(cat "$lock")"
+        BUILD_EXTRA_ARGS="--build-arg GPU_BASE=$(cat "$lock")" exec "$KIT/build.sh"
+        ;;
+    gpu-info)
+        docker logs "$CONTAINER" 2>&1 | grep -iE "offloaded|using device|ggml_vulkan|model server ready" || echo "no GPU lines in the session log"
+        ;;
+    *)
+        exec "$KIT/ephemeral-llm" "$@"
+        ;;
+esac

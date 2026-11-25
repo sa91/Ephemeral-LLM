@@ -1,0 +1,44 @@
+# GPU variant: llama.cpp with Vulkan, for a Colima VM of type krunkit (GPU passed in as /dev/dri).
+# Stage 1 fetches the same model the CPU image uses; stage 2 is the RamaLama image, which carries
+# llama-server built for Vulkan and the Mesa driver that works inside a krunkit VM.
+ARG BASE=ollama/ollama:latest
+ARG GPU_BASE=quay.io/ramalama/ramalama:latest
+
+FROM ${BASE} AS model
+ARG MODEL=qwen3.5:9b-q4_K_M
+ENV OLLAMA_MODELS=/opt/models
+RUN mkdir -p /opt/models \
+ && (ollama serve >/tmp/pull.log 2>&1 &) \
+ && for i in $(seq 1 30); do ollama list >/dev/null 2>&1 && break; sleep 1; done \
+ && ollama pull "${MODEL}" \
+ && mv "$(ls -S /opt/models/blobs/* | head -1)" /opt/model.gguf \
+ && head -c 4 /opt/model.gguf | grep -q GGUF
+
+FROM ${GPU_BASE}
+ARG MODEL=qwen3.5:9b-q4_K_M
+ARG PYMUPDF_VERSION=1.26.7
+
+RUN dnf install -y python3 python3-pip tesseract tesseract-langpack-eng tesseract-langpack-deu shadow-utils \
+ && dnf clean all \
+ && python3 -m venv /opt/venv \
+ && /opt/venv/bin/pip install --no-cache-dir "pymupdf==${PYMUPDF_VERSION}" \
+ && ln -s "$(dirname "$(find /usr/share -name eng.traineddata | head -1)")" /opt/tessdata \
+ && command -v llama-server
+
+COPY --from=model --chmod=0444 /opt/model.gguf /opt/model.gguf
+
+RUN useradd --uid 10001 --no-create-home --shell /bin/bash redactor
+COPY --chmod=0555 entrypoint.sh redact.py chat.py selftest.py chat docs redact bashrc /app/
+
+ENV MODEL=${MODEL} \
+    LLM_API=openai \
+    HOME=/tmp/home \
+    WORK=/work \
+    TESSDATA_PREFIX=/opt/tessdata \
+    PATH=/app:/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+USER 10001
+WORKDIR /work
+ENTRYPOINT ["/app/entrypoint.sh"]

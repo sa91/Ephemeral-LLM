@@ -7,7 +7,7 @@ umask 077
 
 die() { echo "ephemeral-llm: $*" >&2; exit 1; }
 log() { mkdir -p "$EVIDENCE"; echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "$EVIDENCE/host.log"; }
-need_docker() { docker info >/dev/null 2>&1 || die "Docker is not running. Start it with: colima start"; }
+need_docker() { docker info >/dev/null 2>&1 || die "Docker VM '$DOCKER_CONTEXT' is not running (see: colima list)"; }
 running() { [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]; }
 need_session() { need_docker; running || die "no session is running"; }
 cx() { docker exec "$CONTAINER" "$@"; }
@@ -37,19 +37,19 @@ start_session() {
         --pids-limit 512 --memory "$CONTAINER_MEM" --memory-swap "$CONTAINER_MEM" \
         --tmpfs "/work:rw,noexec,nosuid,nodev,size=$WORK_SIZE,uid=10001,gid=10001,mode=0700" \
         --tmpfs "/tmp:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700" \
-        --log-opt max-size=1m -e NUM_CTX="$NUM_CTX" "$IMAGE" >/dev/null
+        --log-opt max-size=1m -e NUM_CTX="$NUM_CTX" $EXTRA_RUN_ARGS "$IMAGE" >/dev/null
 
     # Prove the seal from outside before any file goes in.
     local got want
-    got="$(docker container inspect -f '{{.HostConfig.NetworkMode}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{len .Mounts}}|{{len .HostConfig.Binds}}|{{len .NetworkSettings.Ports}}|{{len .HostConfig.PortBindings}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Privileged}}|{{.Config.User}}|{{json .HostConfig.CapDrop}}' "$CONTAINER")"
-    want='none|none,|0|0|0|0|true|false|10001|["ALL"]'
+    got="$(docker container inspect -f '{{.HostConfig.NetworkMode}}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{len .Mounts}}|{{len .HostConfig.Binds}}|{{len .NetworkSettings.Ports}}|{{len .HostConfig.PortBindings}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Privileged}}|{{.Config.User}}|{{json .HostConfig.CapDrop}}|{{len .HostConfig.Devices}}' "$CONTAINER")"
+    want='none|none,|0|0|0|0|true|false|10001|["ALL"]|'"$EXPECT_DEVICES"
     if [ "$got" != "$want" ]; then
         docker rm -f "$CONTAINER" >/dev/null
         log "REFUSED session=$(session_id) inspect=$got"
         die "container is not sealed as required (got: $got); removed it"
     fi
-    log "START session=$(session_id) network=none host folders=0 ports=0 read-only=true caps=none user=10001 mem=$CONTAINER_MEM swap=off"
-    echo "sealed: network=none, host folders=0, ports=0, read-only, no capabilities"
+    log "START session=$(session_id) network=none host folders=0 ports=0 devices=$EXPECT_DEVICES read-only=true caps=none user=10001 mem=$CONTAINER_MEM swap=off"
+    echo "sealed: network=none, host folders=0, ports=0, devices=$EXPECT_DEVICES, read-only, no capabilities"
 
     printf "starting model"
     local i

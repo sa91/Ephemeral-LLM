@@ -18,14 +18,31 @@ echo "work area: tmpfs (RAM only); root filesystem read-only; user $(id -u)"
 
 mkdir -p /work/staging /work/inbox /work/docs /work/redacted /work/notes "$HOME"
 
-ollama serve >/tmp/ollama.log 2>&1 &
-for i in $(seq 1 120); do
-    ollama list >/dev/null 2>&1 && break
-    sleep 1
-done
-if ! ollama list 2>/dev/null | grep -q "${MODEL%%:*}"; then
-    echo "model server did not become ready or model $MODEL is missing"
-    exit 5
+if [ "${LLM_API:-ollama}" = "openai" ]; then
+    # GPU image: llama.cpp's server with the Vulkan backend, model offloaded to the GPU
+    llama-server -m /opt/model.gguf --host 127.0.0.1 --port 11434 -c "${NUM_CTX:-16384}" \
+        -ngl 999 --jinja --parallel 1 >/tmp/llama.log 2>&1 &
+    for i in $(seq 1 170); do
+        python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:11434/health', timeout=2).status == 200 else 1)" 2>/dev/null && break
+        sleep 1
+    done
+    if ! python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:11434/health', timeout=2)" 2>/dev/null; then
+        echo "model server did not become ready"
+        grep -iE "error|failed|vulkan" /tmp/llama.log | tail -5
+        exit 5
+    fi
+    # which device the model really landed on (no document content in these lines)
+    grep -iE "offloaded [0-9]+/[0-9]+ layers|using device|ggml_vulkan: [0-9]+ =" /tmp/llama.log | head -4
+else
+    ollama serve >/tmp/ollama.log 2>&1 &
+    for i in $(seq 1 120); do
+        ollama list >/dev/null 2>&1 && break
+        sleep 1
+    done
+    if ! ollama list 2>/dev/null | grep -q "${MODEL%%:*}"; then
+        echo "model server did not become ready or model $MODEL is missing"
+        exit 5
+    fi
 fi
 echo "model server ready: $MODEL"
 touch /work/.ready
