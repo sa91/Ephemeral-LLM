@@ -22,10 +22,18 @@ human_only() {
 session_file() { echo "$EVIDENCE/session.current"; }
 session_id() { cat "$(session_file)" 2>/dev/null || echo "unknown"; }
 
+# Two sessions do not fit in the VM's memory, so a session and the self-test take turns.
+wait_gone() {
+    docker container inspect "$1" >/dev/null 2>&1 || return 0
+    echo "$2. Waiting for it to finish; Ctrl-C to give up."
+    while docker container inspect "$1" >/dev/null 2>&1; do sleep 5; done
+    sleep 2   # let its purge check finish printing
+}
+
 start_session() {
     docker image inspect "$IMAGE" >/dev/null 2>&1 || die "image $IMAGE not found; run ./build.sh first"
     case "$CONTAINER" in *-selftest) ;; *)
-        docker container inspect "$CONTAINER-selftest" >/dev/null 2>&1 && die "the self-test is running (about 2 minutes); try again when it has finished" ;;
+        wait_gone "$CONTAINER-selftest" "the self-test is running (about 2 minutes)" ;;
     esac
     if docker container inspect "$CONTAINER" >/dev/null 2>&1; then
         docker rm -f "$CONTAINER" >/dev/null   # a stopped leftover
@@ -288,9 +296,12 @@ cmd_status() {
 # End-to-end check with an invented statement. Safe for anyone (and Claude Code) to run.
 cmd_selftest() {
     need_docker
-    docker container inspect "$CONTAINER" >/dev/null 2>&1 && die "a session exists; run ./ephemeral-llm kill first"
+    # never ends a session to make room: it takes its turn after it
+    wait_gone "$CONTAINER" "a session exists (it ends with ./ephemeral-llm kill, or by itself after redact <files>)"
     # its own container name, so an `open` typed meanwhile can never load real files into the test
     export CONTAINER="$CONTAINER-selftest"
+    # another self-test in progress takes its turn first; a stopped leftover is cleared
+    [ "$(docker container inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ] && wait_gone "$CONTAINER" "another self-test is running"
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     local tmp ok=1
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/ellm-selftest.XXXXXX")"
@@ -303,7 +314,10 @@ cmd_selftest() {
         cx cat "/tmp/selftest.$e" > "$tmp/statement_12345678_Jonas Testmann.$e"
         cx rm "/tmp/selftest.$e"
     done
-    send_files "$tmp/statement_12345678_Jonas Testmann.pdf" "$tmp/statement_12345678_Jonas Testmann.xlsx" "$tmp/statement_12345678_Jonas Testmann.csv"
+    # the csv a second time from another folder: two inputs of one name must give two outputs
+    mkdir "$tmp/again"
+    cp "$tmp/statement_12345678_Jonas Testmann.csv" "$tmp/again/"
+    send_files "$tmp/statement_12345678_Jonas Testmann.pdf" "$tmp/statement_12345678_Jonas Testmann.xlsx" "$tmp/statement_12345678_Jonas Testmann.csv" "$tmp/again/statement_12345678_Jonas Testmann.csv"
     [ "$(cx python /app/redact.py status | sed 's/.*redacted=\([0-9]*\).*/\1/')" = "0" ] || { echo "open redacted without being asked"; ok=0; }
     cx bash -c 'command -v chat >/dev/null && command -v docs >/dev/null && test -x /app/redact && test -r /app/bashrc' || { echo "login commands missing in the container"; ok=0; }
     if [ "${1:-}" = "--no-list" ]; then
@@ -314,11 +328,20 @@ cmd_selftest() {
     cx /app/redact
     local t0; t0=$(date +%s)
     wait_idle
-    echo "redaction took $(( $(date +%s) - t0 ))s for 1 page, 1 workbook of 2 sheets and 1 csv"
+    echo "redaction took $(( $(date +%s) - t0 ))s for 1 PDF of 3 pages, 1 workbook of 2 sheets and 2 csv"
     for e in pdf xlsx csv; do
-        cx sh -c "python /app/selftest.py check /work/redacted/REDACTED_*.$e" || ok=0
+        cx sh -c "for f in /work/redacted/REDACTED_*.$e; do python /app/selftest.py check \"\$f\" || exit 1; done" || ok=0
     done
     KEEP_STAGE=1 cmd_out
+    # output names: REDACTED_<name>.<ext> with no running number, and " (2)" for the second csv instead of replacing the first
+    if ls "$LAST_DEST" | grep -qE '^REDACTED_[0-9]{3}_'; then echo "an output name still has a running number"; ok=0; fi
+    [ "$(ls "$LAST_DEST" | grep -cE '^REDACTED_.*\.csv$')" = "2" ] || { echo "two inputs of the same name did not give two outputs"; ok=0; }
+    if [ "${1:-}" != "--no-list" ]; then
+        for e in pdf xlsx csv; do
+            [ -f "$LAST_DEST/REDACTED_statement.$e" ] || { echo "expected output name REDACTED_statement.$e is missing"; ok=0; }
+        done
+        [ -f "$LAST_DEST/REDACTED_statement (2).csv" ] || { echo "the second csv of the same name is not named with (2)"; ok=0; }
+    fi
     if [ "${1:-}" != "--no-list" ] && ls "$LAST_DEST" | grep -qE '12345678|Testmann'; then echo "file name leaks an identifier"; ok=0; fi
     grep -rqE 'Testmann|12345678|70553318|Musterweg' "$LAST_DEST"/*.json && { echo "report leaks an identifier"; ok=0; }
     cmd_clean

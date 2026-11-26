@@ -54,7 +54,9 @@ To redact in one go, with or without a session running, give the files (or ask C
 ./ephemeral-llm redact ~/Downloads/a.pdf ~/Downloads/b.xlsx
 ```
 
-The redacted copies appear as `/tmp/REDACTED_<n>_<name>.pdf` (`.xlsx`, `.csv`, `.tsv` for spreadsheets). Review each: PDFs in Preview,
+The redacted copies appear as `/tmp/REDACTED_<name>.pdf` (`.xlsx`, `.csv`, `.tsv` for spreadsheets), where `<name>` is the
+original file name with identifiers taken out. Two files of the same name in one session give `REDACTED_<name>.pdf` and
+`REDACTED_<name> (2).pdf`. A copy of the same name left in `/tmp` by an earlier session is replaced. Review each: PDFs in Preview,
 spreadsheets in Numbers or Excel, hidden sheets included. When you are finished with the model:
 
 ```bash
@@ -71,13 +73,30 @@ spreadsheets in Numbers or Excel, hidden sheets included. When you are finished 
 | `shell` | log back into the running session without loading anything. Your terminal only. |
 | `chat` | go straight into the chat from the Mac. Your terminal only. |
 | `status` | running, network mode, model busy/idle, file counts |
-| `selftest` | full run on an invented statement (a PDF, an xlsx with a hidden sheet, a csv) in its own container: load, redact, out, clean, kill, purge report. `open` is refused while it runs. |
+| `selftest` | full run on an invented statement (a PDF of 3 pages, an xlsx with a hidden sheet, a csv loaded twice) in its own container: load, redact, out, clean, kill, purge report. `open` is refused while it runs. |
 
 ## Reading the redaction summary
 
 - `ok` - nothing found again in the output, by text search or by OCR of the rendered pages.
 - `WARNING ... CHECK` - a scan, a page where the model failed, OCR still reads something identifier-like, or a workbook had images, charts or pivot tables (they are left out of the copy). Look at that file.
-- `FAILED` - identifier text was still in the saved file. The output was withheld and never left the container.
+- `LEAK` - identifier text the kit itself found was still in the saved file. The copy is handed out anyway so it can be
+  reviewed and the rule fixed, but it must not be shared: fix the rule and redact the file again.
+- `FAILED` - the file could not be opened (password-protected, damaged); nothing was produced.
+
+What the PDF rules add to the patterns, your list and the model:
+
+- An address printed as a block is removed by where it stands: the lines between the holder's name (or a `PAN:` / `Name:`
+  line) and a `Mobile:` / `Phone:` / `Email:` line under it, in the same left-aligned column. Lines of the form `Label: value`
+  in between stay, and so does text in a column beside the block.
+- In an underscore-joined reference such as `Report_v1.2_7300150022-480060913_01-Jan-2025`, the numbers of 7 or more digits
+  are removed on every page; the report name and the dates stay.
+- An ISIN with a valid check digit is always kept, also where OCR misreads it on a page that has images.
+- On a form, what stands in the boxes of the withholding agent, payer or employer (name, GIIN, tax numbers, address) is kept on
+  every copy; what stands in the recipient's boxes is removed. A numbered box such as `12h Address` belongs to whoever owns
+  another box of that number (`12a Withholding agent's EIN`).
+- In a table of dated trades the model alone cannot remove anything but a person's name: dates, descriptions, quantities,
+  tickers and amounts stay unless a pattern or your list matches them. Decimal numbers are never taken apart.
+- An account number after its label that the file holds in two pieces (`U1234567` and `8`) is removed whole.
 
 `ok` means everything that was *found* is gone. It cannot mean nothing was *missed*. Your review in Preview is the
 last check; add misses to `identifiers.txt`, `open` the file again and redact again.
@@ -133,7 +152,8 @@ Mac's GPU into the container as one device. Measured on an M1 Pro: 59-60 s for t
 ```
 
 `vm-start` stops the CPU VM (refused while a session is running) and starts the GPU one; `vm-stop` does the
-reverse. `build` is needed once. Every other command is the same as `./ephemeral-llm`, including `redact`,
+reverse. `build` is needed once and takes about 21 GB inside the VM while it runs; a krunkit VM keeps Docker's
+data on its root disk, so `vm-start` sizes that at 40 GB (`GPU_VM_ROOT_DISK`). Every other command is the same as `./ephemeral-llm`, including `redact`,
 `kill` and `selftest`. At start it prints the device the model landed on, for example
 `model device: Vulkan0: Virtio-GPU Venus (Apple M1 Pro)`.
 

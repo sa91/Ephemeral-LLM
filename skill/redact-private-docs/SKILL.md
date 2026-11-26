@@ -19,7 +19,7 @@ When the user asks to redact one or more PDFs or spreadsheets (`.xlsx`, `.xlsm`,
 
 This starts the sealed session if needed, loads the files, redacts them (about a minute and a half per page;
 run it in the background for long documents) and writes the redacted copies straight into `/tmp` as
-`/tmp/REDACTED_<n>_<name>.pdf` (spreadsheets: `.xlsx`, or `.csv`/`.tsv` for those; `.xlsm`, `.xls` and `.ods` come out as `.xlsx`), printing one line per file. For a spreadsheet `pages` is the number of sheets and `boxes` the number of replacements; large sheets take a minute or two per 6000 characters of new text. Folders and `.zip` files are accepted too; a zip is unpacked inside the container, never on the Mac, so do not unzip it yourself. With no paths it
+`/tmp/REDACTED_<name>.pdf` (no running number; a second file of the same name in the session becomes `REDACTED_<name> (2).pdf`; spreadsheets: `.xlsx`, or `.csv`/`.tsv` for those; `.xlsm`, `.xls` and `.ods` come out as `.xlsx`), printing one line per file. For a spreadsheet `pages` is the number of sheets and `boxes` the number of replacements; large sheets take a minute or two per 6000 characters of new text. Folders and `.zip` files are accepted too; a zip is unpacked inside the container, never on the Mac, so do not unzip it yourself. With no paths it
 redacts whatever is already loaded. When done it runs `kill` itself,
 which waits until the user is no longer logged in, so the command may stay open for a while; run it in the background. The command streams the originals into the container without showing
 their content; never open the originals yourself.
@@ -41,7 +41,7 @@ their content; never open the originals yourself.
 
 ## Reporting
 
-- After `redact` or `out`: repeat the per-file lines. Any `WARNING` or `FAILED` line means the user must look at that file; say so plainly. Then tell the user to review each file before sharing it: PDFs in Preview, spreadsheets in Numbers or Excel including hidden sheets. For spreadsheets also say what the copy loses: macros, images, charts, pivot tables and stored formula results (`.xls`/`.ods`: everything but the values), and that whole numbers of 7+ digits are removed unless their column header reads like an amount.
+- After `redact` or `out`: repeat the per-file lines. Any `WARNING` or `FAILED` line means the user must look at that file; say so plainly. A `LEAK` line means the kit itself still found identifier text in that copy: it is handed out for review only and must not be shared. Then tell the user to review each file before sharing it: PDFs in Preview, spreadsheets in Numbers or Excel including hidden sheets. For spreadsheets also say what the copy loses: macros, images, charts, pivot tables and stored formula results (`.xls`/`.ods`: everything but the values), and that whole numbers of 7+ digits are removed unless their column header reads like an amount.
 - Other files (txt, md) cannot be redacted and never leave the container.
 - After `kill`: quote the `RESULT:` line. Anything other than `RESULT: PURGED` is a failure to report, not to fix silently.
 - If the user says an identifier was missed, tell them to add it to `~/PrivateRedactor/identifiers.txt` themselves, then `open` the file again and ask you to redact; do not ask them to paste the identifier into the chat.

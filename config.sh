@@ -28,6 +28,6 @@ WORK_SIZE="${WORK_SIZE:-1g}"
 HOST_DIR="$HOME/PrivateRedactor"
 IDENTIFIERS="$HOST_DIR/identifiers.txt"
 EVIDENCE="$HOST_DIR/evidence"
-# Redacted PDFs are written straight into OUT_DIR as REDACTED_*.pdf (mode 600); their reports go to REPORTS.
+# Redacted copies are written straight into OUT_DIR as REDACTED_<name>.<ext> (mode 600); their reports go to REPORTS.
 OUT_DIR="/private/tmp"
 REPORTS="$EVIDENCE/reports"

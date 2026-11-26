@@ -11,8 +11,12 @@ extract figures, fill a table, compute, summarise, compare, answer a question.
 
 Arguments: the redacted file(s) and the task, in any order. If no file is named, use the files attached to
 the message; if none, ask which `/tmp/REDACTED_*` file (pdf, xlsx, csv, tsv) is meant. Read only the files the user points to.
+The copies are named `REDACTED_<name>.<ext>` with no running number; a second file of the same name in one
+session is `REDACTED_<name> (2).<ext>`.
 
 ## 1. Review the redaction
+
+If the kit reported a file as `LEAK`, start with that file: the kit itself still found identifier text in it. Say where, by kind and place, and put its fix first in step 3.
 
 Read every page of each file (PDFs over 10 pages: in page ranges). For a spreadsheet read every sheet, hidden ones too, and also
 comments, sheet names and document properties; removed values show as `[REDACTED]`. Look for:

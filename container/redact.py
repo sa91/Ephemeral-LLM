@@ -61,9 +61,12 @@ PERSONAL_PHONE_RE = re.compile(r"(?i)\b(?:holder|recipient|your\s+number|mobile|
 # name -> (regex, group to redact). Amounts, dates and plain words must not match.
 PATTERNS = {
     "iban": (re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?(?![A-Za-z0-9])"), 0),
-    "long_number": (re.compile(r"(?<![\w.,])\d{7,}(?![\w]|[.,]\d)"), 0),
+    # "_" joins the parts of a reference ("Report_v1_123456789-987654321_01-Jan-2025"); it is not part of the number
+    "long_number": (re.compile(r"(?<![^\W_])(?<![.,])\d{7,}(?![^\W_]|[.,]\d)"), 0),
     "grouped_number": (re.compile(r"(?<![\w.,-])\d{3,4}(?:[ -]\d{3,4}){2,4}(?![\w]|[.,-]\d)"), 0),
     "account_label": (re.compile(ACCOUNT_LABEL + r"[^\d]{0,40}?(?<![\w.,])(\d+(?:[ -]\d+){0,5})(?!\w|[.,-]\d)"), 1),
+    # an account id after its label that the file holds in two pieces ("U1234567" and "8")
+    "account_split": (re.compile(ACCOUNT_LABEL + r"[^\d]{0,40}?(?<![\w.,])((?=[A-Z0-9]*\d)[A-Z0-9]{5,} \d{1,2})(?!\w|[.,/-]\d)"), 1),
     "account_id": (re.compile(r"(?<![A-Za-z0-9])(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{8,}(?![A-Za-z0-9])"), 0),
     "ssn_itin": (re.compile(r"(?<![\w-])\d{3}-\d{2}-\d{4}(?![\w-])"), 0),
     "us_tin": (re.compile(r"(?<![\w-])\d{2}-\d{7}(?![\w-])"), 0),
@@ -71,7 +74,7 @@ PATTERNS = {
     "bic_ctx": (re.compile(r"(?i:\b(?:BIC|SWIFT)(?:[ /]*(?:BIC|SWIFT|code))?\W{0,12})([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)(?![A-Za-z0-9])"), 1),
     "bic": (re.compile(r"(?<![A-Za-z0-9])[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?(?![A-Za-z0-9])"), 0),
     "email": (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), 0),
-    "phone": (re.compile(r"(?<![\w+])(?:\+|00)\d{1,3}[ (]*\d[\d ()/-]{6,14}\d(?!\w)"), 0),
+    "phone": (re.compile(r"(?<![\w+.,])(?:\+|00)\d{1,3}[ (]*\d[\d ()/-]{6,14}\d(?!\w)"), 0),
     "counterparty": (re.compile(
         r"(?:(?i:transfer|payment|sent|received|paid|überweisung|zahlung|gutschrift)\s+(?i:to|from|an|von)"
         r"|(?i:payee|beneficiary|sender|recipient|empfänger|auftraggeber)\s*:?)\s+"
@@ -81,6 +84,10 @@ PATTERNS = {
         r"(\d{1,4}[./-]\d{1,2}[./-]\d{1,4}|[A-Za-zä]{3,9}\.?\s+\d{1,2},?\s+\d{4}|\d{1,2}\.?\s+[A-Za-zä]{3,9}\.?\s+\d{4})"), 1),
     "card_last4": (re.compile(r"(?i)(?:ending(?: in)?|card(?: no\.?| number)?|[*x•·]{2,})[ :.-]{0,3}(\d{4})(?!\d)"), 1),
 }
+
+# an ISIN, and one after its label that the PDF holds in pieces ("ISIN: INF179K01 XY7")
+ISIN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}[A-Z0-9]{9}\d(?![A-Za-z0-9])")
+ISIN_LABEL_RE = re.compile(r"(?i:\bISIN)(?i:\s*(?:code|number|no\.?))?\s*[:#-]?\s*([A-Z]{2}(?: ?[A-Z0-9]){9} ?\d)(?![A-Za-z0-9])")
 
 CUR = r"(?:CHF|USD|EUR|GBP|INR|[$€£%])"
 AMOUNT_RE = re.compile(r"^[+-]?\s*" + CUR + r"?\s*[+-]?\d{1,3}(?:[,.'’ ]?\d{3})*[.,]\d{2}\s*" + CUR + r"?$")
@@ -164,10 +171,64 @@ def institution_tins(text, spans=None):
     return out
 
 
+def isin_spans(text):
+    """Spans of ISINs with a valid check digit: bare, or after an "ISIN:" label."""
+    return [m.span(g) for rx, g in ((ISIN_RE, 0), (ISIN_LABEL_RE, 1)) for m in rx.finditer(text) if is_isin(m.group(g))]
+
+
+# Whose box a value on a form stands in. "Payer's" with the apostrophe: on a bank statement "Payer:" is a person.
+INST_LABEL_RE = re.compile(r"(?i)\b(?:withholding\s+agent|intermediary|flow-through\s+entity|employer|payer['’]s)")
+RECIP_LABEL_RE = re.compile(r"(?i)\b(?:recipient|beneficial\s+owner|account\s+holder|payee|employee)")
+BOX_RE = re.compile(r"(\d{1,2})[a-z]?\s+[A-Z(]")  # "12e Withholding agent's ...": box 12
+
+
+def institution_spans(text, spans):
+    """Spans of what stands in the boxes of the withholding agent, payer or employer on a form: its name,
+    its identification numbers, its address. They are not personal, and they must come out the same on
+    every copy of the form.
+
+    The page is cut into pieces of text (a wide gap ends a piece). A piece is a label of the institution
+    if it starts with words such as "Withholding agent's", a label of the recipient if it names the
+    recipient, and a numbered box ("12h Address") belongs to whoever owns another box of that number
+    ("12a Withholding agent's EIN"). A piece that is no label belongs to the nearest label straight
+    above it, within three lines. Values of the recipient and under labels of unknown owner are not kept.
+    """
+    pieces = text_lines(spans, 0.45)
+    kinds, owner = [], {}
+    for s, e, r in pieces:
+        t = text[s:e]
+        inst, recip, box = INST_LABEL_RE.search(t), RECIP_LABEL_RE.search(t), BOX_RE.match(t)
+        if recip and not (inst and inst.start() < recip.start()):
+            kind = "recipient"
+        elif inst and inst.start() <= 16:
+            kind = "institution"
+        else:
+            kind = "box" if box else None
+        kinds.append([kind, box.group(1) if box else None])
+        if box and kind in ("recipient", "institution") and owner.get(box.group(1)) != "recipient":
+            owner[box.group(1)] = kind
+    for k in kinds:
+        if k[0] == "box":
+            k[0] = owner.get(k[1], "unknown")
+    labels = [(r, k[0]) for (s, e, r), k in zip(pieces, kinds) if k[0]]
+    out = []
+    for (s, e, r), (kind, _) in zip(pieces, kinds):
+        if kind is None:
+            above = [(r.y0 - lr.y0, k) for lr, k in labels
+                     if lr.x0 < r.x1 and lr.x1 > r.x0 and 0 < r.y0 - lr.y0 <= 3 * r.height]
+            kind = min(above)[1] if above else None
+            if kind != "institution":
+                continue
+        if kind == "institution":
+            out.append((s, e))
+    return out
+
+
 def not_personal(text, spans=None):
     """Spans that look like identifiers and are not: the institution's tax number, the number of a
-    public form ("OMB No. 1545-0096"), the institution's phone numbers in running small print."""
-    out = institution_tins(text, spans)
+    public form ("OMB No. 1545-0096"), the institution's phone numbers in running small print,
+    and ISINs, so that no pattern takes a piece out of one ("...XX1234" reads like a card ending)."""
+    out = institution_tins(text, spans) + isin_spans(text) + (institution_spans(text, spans) if spans else [])
     for m in BARE_ACCOUNT_RE.finditer(text):
         if FORM_NO_RE.search(text[max(0, m.start() - 14):m.start()]):
             out.append(m.span())
@@ -209,8 +270,10 @@ def literal_regex(term):
         # and the separators may be missing ("14.03.1987" printed as 1 4 0 3 1 9 8 7)
         sep = r"[\s./-]*" if not any(c.isalpha() for c in term) else r"[\s.,/-]*"
         body = sep.join(re.escape(c) for c in term if c.isalnum())
-    else:
-        body = r"[\s,]+".join(re.escape(w.strip(",")) for w in term.split(" ") if w.strip(","))
+        # found inside an underscore-joined reference too, so one page's verdict holds on every page;
+        # never the digits before or after the point of a decimal ("72" in "72.410936")
+        return re.compile(r"(?<![^\W_])(?<!\d[.,])" + body + r"(?![^\W_]|[.,]\d)", re.I)
+    body = r"[\s,]+".join(re.escape(w.strip(",")) for w in term.split(" ") if w.strip(","))
     return re.compile(r"(?<!\w)" + body + r"(?!\w)", re.I)
 
 
@@ -379,22 +442,172 @@ def find(text, spans, literals, counts=None, layer_of=None):
         hits.append(span)
         if counts is not None:
             counts["patterns"] += 1
+    # A literal found on one page is looked for on all of them, but it may not take: a piece of an ISIN
+    # (the model may name one piece of an ISIN that the file holds in two); what stands in the
+    # institution's boxes of a form, unless the user listed it; and, if only the model proposed it,
+    # anything in a row of dated trades that is not written like a person's name ("Stock 120 ABCD",
+    # a ticker, a quantity beside two dates and an amount).
+    keep = isin_spans(text)
+    inst = institution_spans(text, spans) if spans else []
+    rows = None
     for i, rx in enumerate(literals):
+        layer = layer_of[i] if layer_of else None
         for m in rx.finditer(text):
-            if m.end() > m.start():
-                hits.append(m.span())
-                if counts is not None and layer_of:
-                    counts[layer_of[i]] += 1
+            if m.end() <= m.start() or any(a <= m.start() and m.end() <= b for a, b in keep):
+                continue
+            if layer != "identifiers" and any(a <= m.start() and m.end() <= b for a, b in inst):
+                continue
+            if layer == "model" and spans and not NAME_LIKE_RE.fullmatch(m.group()):
+                rows = trade_rows(text, spans) if rows is None else rows
+                if any(a <= m.start() < b for a, b in rows):
+                    continue
+            hits.append(m.span())
+            if counts is not None and layer_of:
+                counts[layer_of[i]] += 1
     return hits
 
 
-def rects_for(hits, spans):
+def part_rects(page, piece, word):
+    """Where the text layer has `piece` inside the word at rect `word`; [] if it is not found there."""
+    try:
+        got = page.search_for(piece, clip=fitz.Rect(word.x0 - 1, word.y0 - 1, word.x1 + 1, word.y1 + 1))
+    except Exception:
+        return []
+    out = []
+    for q in got:
+        q = fitz.Rect(q) & word
+        if q.width > 3:  # the box is drawn 0.5 wider on each side: stay off the characters next to the piece
+            out.append(fitz.Rect(q.x0 + 0.7, word.y0, q.x1 - 0.7, word.y1))
+    return out
+
+
+NAME_LIKE_RE = re.compile(r"(?:[A-ZÄÖÜ][a-zäöüß'’-]+[.,]?\s+)+[A-ZÄÖÜ][a-zäöüß'’-]+")  # "Petra Beispiel"
+DECIMAL_RE = re.compile(r"[+-]?\d{1,3}(?:[,.'’]?\d{3})*[.,]\d{1,6}")
+
+
+def trade_rows(text, spans):
+    """Spans of the words on rows of a table of dated entries: a date and, beside it, another date or a decimal amount."""
+    rows = []
+    for s, e, r in sorted(spans, key=lambda w: w[2].y0 + w[2].y1):
+        if rows and abs((r.y0 + r.y1) - rows[-1][0]) <= 0.8 * r.height:
+            rows[-1][1].append((s, e))
+        else:
+            rows.append((r.y0 + r.y1, [(s, e)]))
+    out = []
+    for _, words in rows:
+        cells = [text[s:e].strip(".,;:()") for s, e in words]
+        dates = sum(bool(DATE_RE.match(c)) for c in cells)
+        if dates and dates + sum(bool(DECIMAL_RE.fullmatch(c)) for c in cells) >= 2:
+            out += words
+    return out
+
+
+def rects_for(hits, spans, text=None, page=None):
+    """The word rectangles of the hits. With a page: a hit that is only a piece of a long word (a number
+    inside "Report_v1_123456789_01-Jan-2025") gets its own piece of the word, so the rest of it stays."""
     rects = []
     for s, e in hits:
         for ws, we, r in spans:
             if ws < e and we > s:
-                rects.append(r)
+                part = []
+                if page is not None and sum(c.isalnum() for c in text[ws:max(s, ws)] + text[min(e, we):we]) >= 4:
+                    part = part_rects(page, text[max(s, ws):min(e, we)], r)
+                rects += part or [r]
     return rects
+
+
+# A postal address printed as a block has no pattern: it is known by where it stands, between the
+# holder's name (or the "PAN:" / "Name:" line) and the "Mobile:" / "Email:" / "Phone:" line under it.
+ADDRESS_END_RE = re.compile(r"(?i)(?:mobile|mob|cell|phone|tel|telephone|e-?mail)(?:\s*(?:no|number|id))?\.?\s*:")
+ADDRESS_START_RE = re.compile(r"(?i)(?:PAN|name|holder|investor|customer|client)\b[^:]{0,20}:")
+FIELD_RE = re.compile(r"[^\W\d_][^:]{0,30}:(?:\s|$)")  # "Label: value" is not an address line
+ADDRESS_LINES = 8  # how far above the label the block is looked for
+# a block with one of these in it is a company's letterhead or a box of a form, not the holder's address
+NOT_HOLDER_RE = re.compile(r"(?i)\b(?:agent|payer|employer|bank|brokers?|LLC|Inc|Ltd|AG|GmbH|Corp|plc|SA)\b")
+
+
+def text_lines(spans, gap=1.5):
+    """Lines as [first char, last char, rect]: words that follow each other on one row.
+    A gap wider than `gap` line heights starts a new line, so two columns side by side are two lines."""
+    lines = []
+    for s, e, r in spans:
+        if r.height <= 0:
+            continue
+        last = lines[-1] if lines else None
+        if (last and abs((r.y0 + r.y1) - (last[2].y0 + last[2].y1)) / 2 <= 0.4 * r.height
+                and -0.5 * r.height <= r.x0 - last[2].x1 <= gap * r.height):
+            last[1] = e
+            last[2] = fitz.Rect(last[2].x0, min(last[2].y0, r.y0), r.x1, max(last[2].y1, r.y1))
+        else:
+            lines.append([s, e, fitz.Rect(r)])
+    return lines
+
+
+def address_lines(text, spans, hit_rects):
+    """Spans of the address lines of the page (see ADDRESS_END_RE above).
+
+    From each "Mobile:" line the lines straight above it are taken, as long as they start at the same
+    left edge, are of the same size and follow without a gap. The block starts at the nearest
+    "PAN:" / "Name:" line, or without one at the topmost line that is removed as a whole (the name).
+    What lies between is the address, apart from "Label: value" lines. A block that names a company,
+    or that stands in the institution's boxes of a form, is left alone.
+    """
+    lines = text_lines(spans)
+    inst = institution_spans(text, spans)
+    words = [(s, e, r) for s, e, r in spans if r.height > 0]
+
+    def gone(ln):  # every word of the line is under a hit
+        inside = [r for ws, we, r in words if ln[0] <= ws and we <= ln[1]]
+        return bool(inside) and all(under_bars(r, hit_rects) for r in inside)
+
+    out = []
+    for s, e, r in lines:
+        if not ADDRESS_END_RE.match(text[s:e]):
+            continue
+        col, cur = [], r
+        while len(col) < ADDRESS_LINES:
+            above = [ln for ln in lines
+                     if abs(ln[2].x0 - r.x0) <= max(1.5, 0.25 * r.height)
+                     and 0.4 * cur.height < cur.y0 - ln[2].y0 <= 2 * cur.height
+                     and 0.75 <= ln[2].height / cur.height <= 1.33]
+            if not above:
+                break
+            col.append(max(above, key=lambda ln: ln[2].y0))
+            cur = col[-1][2]
+        if not col or ADDRESS_END_RE.match(text[col[0][0]:col[0][1]]):
+            continue  # "Email:" under "Mobile:": the upper label does the work
+        start = next((k for k, ln in enumerate(col) if ADDRESS_START_RE.match(text[ln[0]:ln[1]])), None)
+        if start is None:
+            hit = [k for k, ln in enumerate(col) if gone(ln)]
+            start = hit[-1] + 1 if hit else None  # the name line itself is part of the block
+        block = col[:start or 0]
+        if any(NOT_HOLDER_RE.search(text[ln[0]:ln[1]]) or any(a <= ln[0] and ln[1] <= b for a, b in inst)
+               for ln in block + [[s, e, r]]):
+            continue
+        for ln in block:
+            line = text[ln[0]:ln[1]]
+            if not FIELD_RE.match(line) and len(line) <= 60 and not AMOUNT_RE.match(line) and not DATE_RE.match(line):
+                out.append((ln[0], ln[1]))
+    return out
+
+
+def misread_isin(hits, ospans, isins):
+    """True when every OCR word of the hits lies on a word that the text layer holds as a valid ISIN,
+    or on what the text layer has in the institution's boxes of a form (`isins`: the rects of both).
+
+    OCR reads a 0 in an ISIN as O now and then; the check digit then fails and the word looks like an
+    account id. Where the page's own text has a valid ISIN at that place, the text is right. And the
+    labels of a form are read less well by OCR than from the text, so whose box it is comes from the text.
+    """
+    words = rects_for(hits, ospans)
+    return bool(words) and bool(isins) and all(under_bars(r, isins) for r in words)
+
+
+def reference_parts(cand):
+    """A model candidate with an underscore-joined reference in it ("Report_v1_123456789-987654321_01-Jan-2025")
+    is cut down to the long numbers of that reference: the report name and the dates in it are not personal."""
+    runs = [d for w in cand.split() if w.count("_") >= 2 for d in re.findall(r"(?<!\d)\d{7,}(?!\d)", w)]
+    return runs or [cand]
 
 
 def under_bars(rect, bars):
@@ -475,15 +688,27 @@ PROMPT = (
     "payee, sender, beneficiary) is a person's name and must be listed.\n"
     "Do NOT list: bank, broker or company names, amounts, currencies, transaction dates, "
     "statement periods, ISINs, security names, form names, headings, labels such as IBAN, Holder or code, "
-    "ordinary words or phrases from sentences and small print.\n"
+    "ordinary words or phrases from sentences and small print, the labels of the boxes of a form "
+    "(Income code, Country code, status code), and nothing from the rows of a table of trades or "
+    "payments except a person's name: no trade dates, no descriptions such as 'Forex 1200 EUR.CHF' or "
+    "'Stock -55 ABCD', no quantities, no ticker symbols.\n"
     "The name, tax number (EIN, TIN), address and phone number of the bank, broker, withholding agent, "
     "payer or employer are NOT personal: do not list them. The recipient's or holder's own name, address, "
     "tax number, account number and date of birth must still be listed.\n"
+    "An address is often printed without a label, as a few lines under the holder's name and above "
+    "a Mobile, Phone or Email line: list each of its parts (house, street, area, town, state with "
+    "postcode, country).\n"
     "Each item is one identifier, a few words at most, never a whole line.\n"
     'Copy each string exactly as printed. Answer with JSON only: {"items": ["...", "..."]}\n'
     "Example page: 'Holder: Maria Muster, Seeweg 3, 6000 Luzern  Ref K-20391  "
     "02.01.2025 Standing order Hans Meier rent -900.00 CHF  03.01.2025 Dividend Nestle SA 40.00 CHF'\n"
-    'Example answer: {"items": ["Maria Muster", "Seeweg 3", "6000 Luzern", "K-20391", "Hans Meier"]}'
+    'Example answer: {"items": ["Maria Muster", "Seeweg 3", "6000 Luzern", "K-20391", "Hans Meier"]}\n'
+    "Example page: 'PAN: QWERT9876Z Maria Muster 4 Rose Villa Lake Road Oldtown Kanton Luzern 6000 "
+    "Schweiz Mobile: +41 79 000 00 00 Email: maria@example.com  Folio No: 7788990 Example Growth Fund "
+    "ISIN: CH0012221716  12d Withholding agent's name Example Brokers LLC 12f Country code US "
+    "3 Income code 06  Date Acquired 01/15/2025 Forex 1200 EUR.CHF Proceeds -412.375 EUR'\n"
+    'Example answer: {"items": ["QWERT9876Z", "Maria Muster", "4 Rose Villa", "Lake Road Oldtown", '
+    '"Kanton Luzern 6000", "Schweiz", "+41 79 000 00 00", "maria@example.com", "7788990"]}'
 )
 
 
@@ -518,15 +743,44 @@ def ask_model(page_text, known=()):
     return [i for i in items if isinstance(i, str)]
 
 
+CURRENCIES = set("CHF USD EUR GBP INR JPY CAD AUD NZD SEK NOK DKK HKD SGD CNY CNH MXN ZAR PLN CZK HUF TRY ILS KRW BRL".split())
+LABEL_ENDS = {"code", "codes", "number", "no", "status", "type", "rate", "date", "amount", "name", "id"}
+
+
+def trade_word(w):
+    """A word that only a transaction has: a date, an amount, a negative number, a currency or a currency pair, an ISIN."""
+    w = w.strip(".,;:()[]$€£")
+    return bool(is_isin(w) or AMOUNT_RE.match(w) or DATE_RE.match(w) or DECIMAL_RE.fullmatch(w)
+                or re.fullmatch(r"[-−]\d[\d.,'’]*", w) or w in CURRENCIES
+                or (re.fullmatch(r"[A-Z]{3}[./][A-Z]{3}", w) and w[:3] in CURRENCIES and w[4:] in CURRENCIES))
+
+
+PERIOD_RE = re.compile(
+    r"(?<!\w)(?:[A-Za-zä]{3,9}\.?\s+\d{1,2}(?:\s*[-–]\s*\d{1,2})?,?\s+\d{4}"      # December 1-31, 2025
+    r"|\d{1,2}\.?(?:\s*[-–]\s*\d{1,2}\.?)?\s+[A-Za-zä]{3,9}\.?\s+\d{4}"            # 1.-31. Dezember 2025
+    r"|\d{1,4}[./-]\d{1,2}[./-]\d{1,4})(?!\w)")
+
+
+def without_dates(cand):
+    """A model suggestion without the dates and periods in it: "4821-7754 December 1-31, 2025" names an
+    account, and the statement period beside it has to stay. A date of birth is found by its own pattern."""
+    return " ".join(PERIOD_RE.sub(" ", cand).split()).strip(" ,;:-")
+
+
 def accept_candidate(cand, page_text_norm):
     c = " ".join(cand.split())
     words = c.split(" ")
     if len(c) < 3 or len(words) > 8:
         return False
     # the model may only add identifiers, never take out what the tax return needs
-    if any(is_isin(w) or AMOUNT_RE.match(w) or DATE_RE.match(w) for w in words) or AMOUNT_RE.match(c):
+    if any(trade_word(w) for w in words) or AMOUNT_RE.match(c) or DATE_TEXT_RE.fullmatch(c.strip(".,;:()")):
         return False
-    if c.isdigit() and len(c) < 5:  # years, page numbers, quantities
+    alnum = [ch for ch in c if ch.isalnum()]
+    if len(alnum) < 5 and all(ch.isdigit() for ch in alnum):  # years, page numbers, quantities, "-55", "01/15"
+        return False
+    # "Income code", "Ch. 3 status code", "Account number": the label of a box, not what is written in it
+    if (len(words) > 1 and words[-1].lower().strip(".:") in LABEL_ENDS
+            and not any(sum(ch.isdigit() for ch in w) >= 5 for w in words)):
         return False
     has_digit = any(ch.isdigit() for ch in c)
     if len(words) == 1 and len(c) < 4 and not has_digit:
@@ -588,12 +842,23 @@ def strip_hidden_parts(doc):
     return notes
 
 
-def redact_file(src, index, use_model=True):
-    """Redact one PDF; returns the report dict (no identifier values in it)."""
+def claim_name(stem, ext, taken):
+    """An output name that no other file of this session has: REDACTED_x.pdf, then "REDACTED_x (2).pdf"."""
+    n, name = 1, stem + ext
+    while name.lower() in taken or os.path.exists(f"{OUTBOX}/{name}"):
+        n += 1
+        name = f"{stem} ({n}){ext}"
+    taken.add(name.lower())
+    return name
+
+
+def redact_file(src, taken, use_model=True):
+    """Redact one PDF; returns the report dict (no identifier values in it).
+    `taken` holds the output names this session has used, so that none is used twice."""
     user_terms = load_identifiers()
     known = identifier_lines()
     name = os.path.basename(src)
-    out_stem = f"REDACTED_{index:03d}_{sanitise_name(name.split('_', 2)[-1], user_terms)}"
+    out_stem = f"REDACTED_{sanitise_name(name.split('_', 2)[-1], user_terms)}"
     report = {"file": out_stem + ".pdf", "status": "OK", "reasons": [], "pages": 0,
               "image_only_pages": 0, "boxes": 0,
               "hits": {"patterns": 0, "identifiers": 0, "model": 0},
@@ -604,7 +869,8 @@ def redact_file(src, index, use_model=True):
         if doc.needs_pass:
             raise ValueError("password-protected")
     except Exception as exc:
-        report.update(status="FAILED", reasons=[f"could not open PDF ({type(exc).__name__})"])
+        report.update(status="FAILED", reasons=[f"could not open PDF ({type(exc).__name__})"],
+                      file=claim_name(out_stem, ".pdf", taken))
         return report, None
 
     report["reasons"] += strip_hidden_parts(doc)
@@ -615,6 +881,7 @@ def redact_file(src, index, use_model=True):
     # pass 1: collect literal strings (pattern hits + accepted model candidates) from every page
     found = set()
     kept = set()  # the institution's own tax numbers: the model may not add them back
+    inst_kept = set()  # and what stands in the institution's boxes of a form, in lowercase
     streams = []
     for page in doc:
         text, spans = word_stream(page)
@@ -623,12 +890,16 @@ def redact_file(src, index, use_model=True):
             report["image_only_pages"] += 1
         otext, ospans = word_stream(page, ocr=True) if (has_images or len(text.strip()) < 20) else ("", [])
         streams.append((text, spans, otext, ospans))
+        isins = rects_for(isin_spans(text) + institution_spans(text, spans), spans)
         for t, sp in ((text, spans), (otext, ospans)):
             for a, b in pattern_hits(t, sp):
+                if sp is ospans and misread_isin([(a, b)], sp, isins):
+                    continue
                 found.add(("patterns", " ".join(t[a:b].split())))
             for m in PATTERNS["birth_date"][0].finditer(t):
                 found.add(("birth", " ".join(m.group(1).split())))
             kept |= {" ".join(t[a:b].split()) for a, b in not_personal(t, sp)}
+            inst_kept |= {" ".join(t[a:b].split()).lower() for a, b in institution_spans(t, sp)}
         for t, sp in ((text, spans), (otext, ospans)):
             for joined, _ in boxed_runs(t, sp):
                 for a, b in pattern_hits(joined):
@@ -637,8 +908,9 @@ def redact_file(src, index, use_model=True):
             try:
                 norm = " ".join(text.split()).lower()
                 for cand in ask_model(text, known):
+                    cand = without_dates(cand)
                     if accept_candidate(cand, norm):
-                        found.add(("model", " ".join(cand.split())))
+                        found |= {("model", part) for part in reference_parts(" ".join(cand.split()))}
             except Exception:
                 report["model_failed_pages"] += 1
 
@@ -646,7 +918,8 @@ def redact_file(src, index, use_model=True):
     seen = set()
     doc_text = " ".join(f"{text} {otext}" for text, _, otext, _ in streams)
     for layer, s in sorted(found):
-        if layer == "model" and (s in kept or is_label(s, doc_text, doc.page_count)):
+        if layer == "model" and (s in kept or is_label(s, doc_text, doc.page_count)
+                                 or (len(s) >= 4 and any(s.lower() in k for k in inst_kept))):
             continue
         if s.lower() not in seen and len(s) >= 3:
             seen.add(s.lower())
@@ -654,12 +927,32 @@ def redact_file(src, index, use_model=True):
             literals += forms
             layer_of += ["patterns" if layer == "birth" else layer] * len(forms)
 
+    # address blocks, known by where they stand once the names are found. A line with a number in it
+    # (house, postcode) is then searched for on every page; a bare place name is removed only here.
+    address = []
+    for text, spans, otext, ospans in streams:
+        rects = []
+        for t, sp in ((text, spans), (otext, ospans)):
+            lines = address_lines(t, sp, rects_for(find(t, sp, literals, None, layer_of), sp))
+            rects += rects_for(lines, sp)
+            report["hits"]["patterns"] += len(lines)
+            for a, b in lines:
+                s = " ".join(t[a:b].split())
+                if any(c.isdigit() for c in s) and len(s) >= 5 and s.lower() not in seen:
+                    seen.add(s.lower())
+                    literals.append(literal_regex(s))
+                    layer_of.append("patterns")
+        address.append(rects)
+
     # pass 2: every term on every page (text layer and, where there are images, OCR words)
     blacked = []  # per page, the boxes drawn: OCR reads a black bar as stray letters
     for page, (text, spans, otext, ospans) in zip(doc, streams):
-        rects = rects_for(find(text, spans, literals, report["hits"], layer_of), spans)
-        rects += rects_for(find(otext, ospans, literals), ospans)
-        rects += boxed_rects(text, spans, literals, report["hits"], layer_of) + boxed_rects(otext, ospans, literals)
+        rects = rects_for(find(text, spans, literals, report["hits"], layer_of), spans, text, page)
+        isins = rects_for(isin_spans(text) + institution_spans(text, spans), spans)
+        rects += [r for hit in find(otext, ospans, literals, None, layer_of) if not misread_isin([hit], ospans, isins)
+                  for r in rects_for([hit], ospans, otext, page)]
+        rects += boxed_rects(text, spans, literals, report["hits"], layer_of) + boxed_rects(otext, ospans, literals, None, layer_of)
+        rects += address[page.number]
         for r in rects:
             h = r.height * 0.12  # keep clear of the lines above and below
             page.add_redact_annot(fitz.Rect(r.x0 - 0.5, r.y0 + h, r.x1 + 0.5, r.y1 - h), fill=(0, 0, 0))
@@ -670,9 +963,8 @@ def redact_file(src, index, use_model=True):
                                   graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
 
     doc.set_metadata({})
-    out_stem = f"REDACTED_{index:03d}_{sanitise_name(name.split('_', 2)[-1], literals)}"
-    report["file"] = out_stem + ".pdf"
-    out_path = f"{OUTBOX}/{out_stem}.pdf"
+    report["file"] = claim_name(f"REDACTED_{sanitise_name(name.split('_', 2)[-1], literals)}", ".pdf", taken)
+    out_path = f"{OUTBOX}/{report['file']}"
     doc.save(out_path, garbage=4, deflate=True, clean=True)
     doc.close()
 
@@ -683,10 +975,13 @@ def redact_file(src, index, use_model=True):
         report["leaks_found_after"] += 1
     for page in check:
         text, spans = word_stream(page)
-        report["leaks_found_after"] += len(find(text, spans, literals)) + len(boxed_rects(text, spans, literals))
+        report["leaks_found_after"] += (len(find(text, spans, literals, None, layer_of))
+                                        + len(boxed_rects(text, spans, literals, None, layer_of)))
         otext, ospans = word_stream(page, ocr=True)
         bars = blacked[page.number] if page.number < len(blacked) else []
-        seen = rects_for(find(otext, ospans, literals), ospans) + boxed_rects(otext, ospans, literals)
+        isins = rects_for(isin_spans(text) + institution_spans(text, spans), spans)  # what the saved text keeps on purpose is no leak when OCR reads it
+        hits = [h for h in find(otext, ospans, literals, None, layer_of) if not misread_isin([h], ospans, isins)]
+        seen = rects_for(hits, ospans) + boxed_rects(otext, ospans, literals, None, layer_of)
         report["ocr_hits_after"] += len([r for r in seen if not under_bars(r, bars)])
     check.close()
 
@@ -701,10 +996,9 @@ def redact_file(src, index, use_model=True):
     if report["reasons"]:
         report["status"] = "CHECK"
     if report["leaks_found_after"]:
-        # a file that fails its own leak check never leaves the container
-        os.remove(out_path)
-        report["status"] = "FAILED"
-        report["reasons"].append("output withheld")
+        # the copy is still handed out, marked, so that it can be reviewed and the rule that missed can be fixed
+        report["status"] = "LEAK"
+        report["reasons"].append("DO NOT SHARE this copy: review it, fix the rule, redact the file again")
     report["seconds"] = round(time.time() - t0, 1)
     return report, out_path
 
@@ -1101,14 +1395,14 @@ def xml_leaks(path, literals):
     return n
 
 
-def redact_sheet_file(src, index, use_model=True):
+def redact_sheet_file(src, taken, use_model=True):
     """Redact one spreadsheet; returns the report dict (no identifier values in it)."""
     user_terms = load_identifiers()
     known = identifier_lines()
     name = os.path.basename(src)
     ext = os.path.splitext(name)[1].lower()
     out_ext = ext if ext in (".csv", ".tsv") else ".xlsx"
-    out_stem = f"REDACTED_{index:03d}_{sanitise_name(name.split('_', 2)[-1], user_terms)}"
+    out_stem = f"REDACTED_{sanitise_name(name.split('_', 2)[-1], user_terms)}"
     report = {"file": out_stem + out_ext, "status": "OK", "reasons": [], "pages": 0,
               "image_only_pages": 0, "boxes": 0,
               "hits": {"patterns": 0, "identifiers": 0, "model": 0},
@@ -1117,7 +1411,8 @@ def redact_sheet_file(src, index, use_model=True):
     try:
         doc = SheetDoc(src, ext)
     except Exception as exc:
-        report.update(status="FAILED", reasons=[f"could not open spreadsheet ({type(exc).__name__})"])
+        report.update(status="FAILED", reasons=[f"could not open spreadsheet ({type(exc).__name__})"],
+                      file=claim_name(out_stem, out_ext, taken))
         return report, None
     report["reasons"] += doc.reasons
     report["pages"] = len(doc.sheets())
@@ -1160,7 +1455,7 @@ def redact_sheet_file(src, index, use_model=True):
                                       "a colon and its value.\n" + chunk, known):
                     cand = re.sub(r"^[A-Z]{1,3}\d+:\s*", "", cand.strip())
                     if MARK not in cand and accept_candidate(cand, norm):
-                        found.add(("model", " ".join(cand.split())))
+                        found |= {("model", part) for part in reference_parts(" ".join(cand.split()))}
             except Exception:
                 report["model_failed_pages"] += 1
 
@@ -1204,9 +1499,8 @@ def redact_sheet_file(src, index, use_model=True):
         if not n:
             break
 
-    out_stem = f"REDACTED_{index:03d}_{sanitise_name(name.split('_', 2)[-1], literals)}"
-    report["file"] = out_stem + out_ext
-    out_path = f"{OUTBOX}/{out_stem}{out_ext}"
+    report["file"] = claim_name(f"REDACTED_{sanitise_name(name.split('_', 2)[-1], literals)}", out_ext, taken)
+    out_path = f"{OUTBOX}/{report['file']}"
     doc.save(out_path)
 
     # verification: reopen what was saved and read every string in it again
@@ -1234,10 +1528,9 @@ def redact_sheet_file(src, index, use_model=True):
     if report["reasons"]:
         report["status"] = "CHECK"
     if report["leaks_found_after"]:
-        # a file that fails its own leak check never leaves the container
-        os.remove(out_path)
-        report["status"] = "FAILED"
-        report["reasons"].append("output withheld")
+        # the copy is still handed out, marked, so that it can be reviewed and the rule that missed can be fixed
+        report["status"] = "LEAK"
+        report["reasons"].append("DO NOT SHARE this copy: review it, fix the rule, redact the file again")
     report["seconds"] = round(time.time() - t0, 1)
     return report, out_path
 
@@ -1303,7 +1596,7 @@ def wipe():
 
 
 def cmd_watch(args):
-    counter = 0
+    counter, taken = 0, set()  # output names used so far: two inputs of the same name must not share one
     set_state("idle")
     while True:
         files = sorted(f for f in os.listdir(INBOX) if f.lower().endswith(REDACTABLE))
@@ -1317,12 +1610,12 @@ def cmd_watch(args):
             src = os.path.join(INBOX, f)
             try:
                 one = redact_file if f.lower().endswith(".pdf") else redact_sheet_file
-                report, _ = one(src, counter, use_model=not args.no_model)
+                report, _ = one(src, taken, use_model=not args.no_model)
             except Exception as exc:
-                report = {"file": f"REDACTED_{counter:03d}", "status": "FAILED",
+                report = {"file": claim_name("REDACTED_unnamed", "", taken), "status": "FAILED",
                           "reasons": [f"internal error ({type(exc).__name__})"],
                           "leaks_found_after": 0, "ocr_hits_after": 0}
-            with open(f"{OUTBOX}/{os.path.splitext(report['file'])[0]}.report.json", "w") as fh:
+            with open(f"{OUTBOX}/{report['file']}.report.json", "w") as fh:
                 json.dump(report, fh, indent=1)
             os.remove(src)
             print(f"file {counter}: {report['status']} leaks_found_after={report.get('leaks_found_after')} "
@@ -1420,7 +1713,7 @@ def cmd_summary(args):
     reports = sorted(f for f in os.listdir(OUTBOX) if f.endswith(".report.json"))
     for f in reports:
         r = json.load(open(os.path.join(OUTBOX, f)))
-        flag = "ok     " if r["status"] == "OK" else "WARNING"
+        flag = {"OK": "ok     ", "LEAK": "LEAK   "}.get(r["status"], "WARNING")
         print(f"  {flag} {r['file']}: {r['status']}, pages={r.get('pages', 0)}, boxes={r.get('boxes', 0)}, "
               f"leaks_found_after: {r.get('leaks_found_after', 0)}, ocr_hits_after: {r.get('ocr_hits_after', 0)}")
         for reason in r.get("reasons", []) + r.get("notes", []):

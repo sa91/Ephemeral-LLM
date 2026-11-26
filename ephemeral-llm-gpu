@@ -28,7 +28,7 @@ case "${1:-}" in
             session_exists colima && die "a session is running in the CPU VM; end it first (./ephemeral-llm kill)"
             colima stop
         fi
-        colima start "$GPU_PROFILE" --vm-type krunkit --cpus "${GPU_VM_CPUS:-8}" --memory "${GPU_VM_MEM:-12}" --disk 40 --mount none --mount-type sshfs
+        colima start "$GPU_PROFILE" --vm-type krunkit --cpus "${GPU_VM_CPUS:-8}" --memory "${GPU_VM_MEM:-12}" --disk 40 --root-disk "${GPU_VM_ROOT_DISK:-40}" --mount none --mount-type sshfs
         docker context use colima >/dev/null 2>&1 || true   # leave Docker's default pointing at the CPU VM
         ;;
     vm-stop)
