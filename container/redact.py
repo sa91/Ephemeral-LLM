@@ -397,6 +397,12 @@ def rects_for(hits, spans):
     return rects
 
 
+def under_bars(rect, bars):
+    """True when at least half of rect lies on black boxes: what OCR 'reads' there is the bar itself."""
+    area = rect.get_area()
+    return area > 0 and sum((rect & b).get_area() for b in bars if rect.intersects(b)) >= 0.5 * area
+
+
 def boxed_runs(text, spans):
     """Digits printed one per box, read by position instead of by the order they have in the file.
 
@@ -649,6 +655,7 @@ def redact_file(src, index, use_model=True):
             layer_of += ["patterns" if layer == "birth" else layer] * len(forms)
 
     # pass 2: every term on every page (text layer and, where there are images, OCR words)
+    blacked = []  # per page, the boxes drawn: OCR reads a black bar as stray letters
     for page, (text, spans, otext, ospans) in zip(doc, streams):
         rects = rects_for(find(text, spans, literals, report["hits"], layer_of), spans)
         rects += rects_for(find(otext, ospans, literals), ospans)
@@ -657,6 +664,7 @@ def redact_file(src, index, use_model=True):
             h = r.height * 0.12  # keep clear of the lines above and below
             page.add_redact_annot(fitz.Rect(r.x0 - 0.5, r.y0 + h, r.x1 + 0.5, r.y1 - h), fill=(0, 0, 0))
         report["boxes"] += len(rects)
+        blacked.append([fitz.Rect(r) for r in rects])
         if rects:
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS,
                                   graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED)
@@ -677,7 +685,9 @@ def redact_file(src, index, use_model=True):
         text, spans = word_stream(page)
         report["leaks_found_after"] += len(find(text, spans, literals)) + len(boxed_rects(text, spans, literals))
         otext, ospans = word_stream(page, ocr=True)
-        report["ocr_hits_after"] += len(find(otext, ospans, literals)) + len(boxed_rects(otext, ospans, literals))
+        bars = blacked[page.number] if page.number < len(blacked) else []
+        seen = rects_for(find(otext, ospans, literals), ospans) + boxed_rects(otext, ospans, literals)
+        report["ocr_hits_after"] += len([r for r in seen if not under_bars(r, bars)])
     check.close()
 
     if report["leaks_found_after"]:
